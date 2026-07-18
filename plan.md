@@ -1,0 +1,261 @@
+# Fraud Academic Paper Scanner — POC Plan
+
+**Scope:** Biology / microbiology papers only (the author's field).
+**Status:** Proof of concept. Goal is a working end-to-end pipeline on a small slice of data, not production coverage.
+**Related:** Obsidian note `Projects/paper-fraud-scanner/Fraud Academic Paper Scanner Plan`.
+
+---
+
+## 0. Framing and guardrails (read first)
+
+Before any code, three principles that shape every design decision below.
+
+1. **A retraction is not proof of fraud.** The Retraction Watch database mixes deliberate misconduct (paper mills, image manipulation, fabricated data) with honest error, publisher error, plagiarism disputes, and expression-of-concern notices that were later reinstated. In the dataset: of 71,106 records, 3,581 are "Expression of concern", 1,494 are "Correction", and 160 are "Reinstatement" — **not** retractions at all. So the schema must **never** carry a boolean `known_fraud: true` on a person. That is a defamatory claim about a real, named individual.
+
+2. **Model facts, not verdicts.** Store what is verifiable ("this paper was retracted on date X for reason Y") and derive risk *scores* from it. A score is a prioritization signal for a human reviewer, never a conclusion. Every output of this system is a **hypothesis for human review**, which is exactly why step 5 of the original plan (human review table) is the right final gate.
+
+3. **The output is a triage queue, not an accusation.** Framing the UI as "papers a human should look at first, and why" keeps the project defensible, useful, and honest. We surface 🚩 evidence and let a domain expert judge.
+
+4. **Same person ≠ same responsibility.** Once identity is resolved across papers (§2.1b), a person-level signal (e.g. "this probable person has a misconduct-adjudicated paper somewhere in their record") must **never** be read as a claim about any *other specific paper* of theirs. Author role varies paper to paper — 1st/corresponding author carries different responsibility than a middle author of 17, and papers can be decades apart. **Worked example (confirmed 2026-07-17):** Hiroshi Asakura (朝倉 宏, verified same person via researchmap.jp + J-GLOBAL ID 200901058605650763) is **1st author** on a 2021 paper retracted for fabrication (a formal misconduct finding), and a **middle author** (8th of 17) on an unrelated 2001 paper 20 years earlier. Confirming "same person" answers identity; it says nothing about the 2001 paper's risk. **Consequence:** any person-level derived flag (`cluster_adjudicated`, and future Tier-A/Phase-5 signals) must carry a pointer to the *specific* paper(s)/DOI(s) that produced it (`cluster_misconduct_dois`) and, wherever author role is available, show it alongside the flag — never surface the boolean alone.
+
+These are not just ethics footnotes — they change the data model (no fraud boolean), the labels used for ML (retracted-for-misconduct-reason vs. all-retractions), and the UI copy ("flagged for review", not "fraudulent").
+
+---
+
+## 1. Data reality check (from the actual CSV)
+
+Numbers below are measured from `retraction_watch/retraction_watch.csv` (71,106 rows).
+
+| Slice | Count |
+|---|---|
+| All records | 71,106 |
+| Life-science `(BLS)` + Microbiology | 23,991 |
+| — of which Microbiology | 2,100 |
+| Bio rows with an original-paper DOI | 22,992 (96%) |
+| Bio rows with an original-paper PubMed ID | 23,508 (98%) |
+
+**Useful columns:** `Title`, `Subject`, `Institution`, `Journal`, `Publisher`, `Country`, `Author` (semicolon-separated names), `OriginalPaperDOI`, `OriginalPaperPubMedID`, `OriginalPaperDate`, `RetractionDate`, `RetractionNature`, `Reason` (semicolon-separated controlled vocabulary), `Notes`.
+
+**Data quirks to handle in the loader:**
+- `Author` is a `;`-separated string of display names — **no ORCID, no per-author affiliation, no email** in this file. ORCID must be resolved later (PubMed/OpenAlex). So `ORCID` on the author node starts empty and gets enriched.
+- **Author↔institution is a pool, not a mapping.** `Institution` is a `;`-separated, *deduplicated* list of the paper's departments/institutions — it does **not** align with the author list by position or count. Measured on the 23,991 bio rows: only 8.8% have equal author/institution counts (mostly coincidence), 32.8% list a single institution for many authors, 58.4% have mismatched counts. Example: 10 authors → 2 institutions; 7 authors → 5 (shared-department) institutions. **Consequence:** you cannot fill a per-author `affiliation` (or `email`) on the `WROTE` edge from this CSV. Treat institutions as a **paper-level** fact (`(Paper)-[:INVOLVES]->(Institution)`); a clean `(Author)-[:AFFILIATED_WITH]->(Institution)` edge only comes from OpenAlex/PubMed enrichment in Phase 2.
+- `Reason` uses a controlled vocabulary. Top misconduct-signal reasons: `Paper Mill` (11,796), `Compromised Peer Review` (11,421), `Duplication of/in Image` (5,458), `Euphemisms for Plagiarism`, `Fabrication`. Split these on `;` and store as discrete labels — they are the strongest features for step 2.
+- Dates are `M/D/YYYY H:MM`. Some are `0000` / "unknown". Parse defensively.
+- Affiliation lives in `Institution` (per paper, not per author) — semicolon-separated list of departments.
+- Names are not disambiguated. "J Smith" collisions are real. Treat name-only matching as weak evidence; prefer DOI/PMID and (later) ORCID for identity.
+
+---
+
+## 2. Architecture overview
+
+```
+                          ┌──────────────────────────┐
+  Retraction Watch CSV ─▶ │  Loader / normalizer      │
+                          └───────────┬───────────────┘
+                                      ▼
+  OpenAlex (primary) ─enrich─▶ ┌──────────────────┐   ┌────────────────────────┐
+  PubMed  (fallback)           │  Graph DB        │─▶ │ Risk scoring engine    │
+  (co-authored papers)         │ (LadybugDB/Neo4j)│   │  - graph features      │
+                               └──────────────────┘   │  - flag sensors(skills)│
+                                                       └──────────┬─────────────┘
+                                                                  ▼
+                                                          suspicious papers
+                                                                  │
+                      paperconan (Claude skill) ◀─ deep AI ───────┤
+                      run in a routine or                         ▼
+                      interactive session         ┌────────────────────────┐
+                                                  │ FastAPI + HTMX table    │
+                                                  │  (human review queue)   │
+                                                  └────────────────────────┘
+```
+
+**Graph DB choice.** For a single-user embedded POC, use **LadybugDB** (`pip install ladybug`) — an embedded, serverless property-graph DB with Cypher and a Python API (formerly Kùzu; same engine, renamed — https://github.com/LadybugDB/ladybug). No server to run. If you instead want the Neo4j Browser/Bloom visualizations, use **Neo4j Community** in Docker. The schema below is engine-agnostic, so switching later is cheap. **Recommendation: start with LadybugDB.**
+
+**Update (2026-07-17): default switched to Neo4j for now.** All of §2.1b/c (author identity + targeted expansion) is implemented and running live on Neo4j — Browser/Cypher exploration turned out valuable throughout this build (see the worked examples in §2.1b), and the ~15k-node scale here doesn't need an embedded engine. `.env.yaml` `graph_db.engine` now defaults to `"neo4j"`. The LadybugDB-vs-Neo4j analysis below is kept as-is (still the right reasoning for Tier B/C); this is a "for now" pick, not a reversal of that analysis — Ladybug remains a valid option to revisit.
+
+Graph-analytics capability of each engine, relevant to Phase 2 (verified against Ladybug's docs):
+- **LadybugDB has built-in graph algorithms** via its `algo` extension — **PageRank, Weakly/Strongly Connected Components, Louvain (community detection), K-Core, shortest paths.** These cover the Phase 2 **Tier-A** heuristic features (co-author components, distance-to-retracted-author, clusters) natively; no need to hand-roll them.
+- **Result export:** `get_as_df()` (pandas), `get_as_pl()` (polars), `get_as_arrow()` (PyArrow), plus CSV/Parquet/JSON.
+- **No documented direct PyG/DGL/NetworkX exporter** (old Kùzu had `get_as_torch_geometric()`; current Ladybug docs don't list it). So for **Tier B/C** (node2vec, GNN) export an edge list via `get_as_df()` and build the NetworkX/PyG graph in Python — routine, just not one call.
+- **What Neo4j adds (the real gap):** Neo4j's **GDS** library provides a turnkey in-database **node classification pipeline** (`gds.beta.pipeline.nodeClassification`) plus node embeddings (FastRP, node2vec, GraphSAGE, HashGNN). **LadybugDB has neither** — its `llm`/`vector` extensions do text embeddings and similarity search, not graph node embeddings, and there is no supervised training/prediction. So the node-property-prediction goal (Phase 2 Tier B/C) is the one thing that genuinely favors Neo4j. **Decision: start on LadybugDB (Tier A needs no ML), and revisit engine choice at Tier B/C** — see Phase 2. (File I/O is not a factor either way — the pipeline needs none of GraphML/CSV/Parquet specifically.)
+
+**Language/stack:** Python throughout (loader, enrichment, scoring, backend). FastAPI + HTMX + Jinja2 for the frontend. This keeps skills, scoring, and web in one runtime.
+
+---
+
+## 3. Graph schema (revised)
+
+The original `(author)-[:WRITES]->(paper)` is the right spine. Revisions: drop the fraud boolean, add nodes for the entities we actually want to reason over, and attach retraction as facts.
+
+**Nodes**
+- `AuthorInstance { instance_id, name, name_key, orcid?, orcid_raw?, has_orcid, orcid_source, cluster_id, cluster_size, coherence_outlier, on_misconduct_paper, misconduct_reasons[], cluster_adjudicated, identity_override? }` — **one node per authorship** (one author slot on one paper); authors are **never merged** (rationale + pipeline in §2.1b). Supersedes the original merged `Author` node. `orcid` is kept as OpenAlex assigned it (a *low-trust* signal — OpenAlex mis-assigns); a human `split` preserves the original in `orcid_raw`. Same-person identity is a separate, **reversible** edge layer (`PROBABLY_SAME_AS`), not a node merge; `cluster_id` is the derived *probable person*. **No `known_fraud`.** Adjudication is a *sourced per-instance fact* `on_misconduct_paper` (wrote a paper retracted for `Misconduct - Official Investigation(s) and/or Finding(s)` or `Investigation by ORI`; full chain in `(Paper)-[:RETRACTED_FOR]->(Reason)`) **plus** a *derived, reviewable* cluster signal `cluster_adjudicated` — **never a boolean stamped on a person** (§0). Never set from retraction counts or model scores. (201 adjudicated probable-persons in the microbiology seed.)
+- `Paper { doi, pmid, title, published_date, is_retracted (bool), retraction_date?, retraction_nature? }` — `is_retracted` is a *fact* from the source.
+- `Journal { name, publisher? }`
+- `Institution { name, country? }`
+- `Reason { code }` — one node per controlled-vocabulary reason (`Paper Mill`, `Duplication of/in Image`, …).
+
+**Relationships**
+- `(AuthorInstance)-[:WROTE { author_position?, is_corresponding, affiliation?, email? }]->(Paper)` — now **1:1** (one authorship per instance). `affiliation` is the per-author byline, **populated** from OpenAlex enrichment (cross-checked vs PubMed, which agrees on names/affiliations); `email` still unavailable.
+- `(AuthorInstance)-[:AFFILIATED_WITH]->(Institution)` — **per-authorship byline** institutions (ROR), from OpenAlex enrichment (Phase 2); not derivable from the CSV.
+- `(AuthorInstance)-[:PROBABLY_SAME_AS { confidence, basis, orcid_conflict, shared_coauthors, shared_institutions, name_match }]->(AuthorInstance)` — the **reversible same-person identity layer** (§2.1b); weighted hypotheses, never a merge.
+- `(Paper)-[:INVOLVES]->(Institution)` — paper-level, from the CSV Institution pool (see §1: not per-author).
+- `(Paper)-[:PUBLISHED_IN]->(Journal)`
+- `(Paper)-[:RETRACTED_FOR]->(Reason)` (only for retracted papers)
+- `(Paper)-[:CITES]->(Paper)` — from the *targeted* expansion (§2.1c), not blanket enrichment: edges from each candidate paper to any paper already in the graph. Powers skill "cited a retracted paper" (Phase 4 #1) and the Tier-A "citations to retracted papers" feature. **Built for the top-N target authors only** (not the whole seed set).
+
+Derived/queryable signals this enables:
+- Co-authorship proximity to authors of retracted papers (graph distance).
+- Journals/publishers with high retraction rate.
+- Institutions clustered in paper-mill retractions.
+- Whether a *new* downloaded paper cites known-retracted work.
+
+---
+
+## 4. Phases
+
+### Phase 1 — Build the seed graph (from CSV)
+**Deliverable:** populated graph of retracted bio papers + their authors/journals/reasons.
+
+1. Filter CSV to `(BLS)` + Microbiology rows (~24k). Optionally start even smaller: **Microbiology only (2,100 rows)** for the first pass to keep everything fast and inspectable.
+2. Normalize: split `Author`, `Reason`, `Subject`; parse dates; canonicalize DOIs (lowercase, strip `https://doi.org/`); build `name_key`.
+3. Upsert nodes/edges. Mark all these papers `is_retracted = true`.
+4. Sanity queries: top journals by retraction count, top reasons, biggest co-author components.
+
+*Exit criteria:* can answer "who co-authored the most retracted microbiology papers, and in which journals" via one query.
+
+### Phase 2 — Enrich + predict (the ML/graph-algorithm core)
+**Deliverable:** a ranked list of *not-yet-retracted* papers that resemble retracted ones.
+
+1. **Enrich — OpenAlex primary, PubMed secondary.** Metadata enrichment (ORCID, per-author affiliation) for each seed paper's authors — done for all 1,631 seed papers. Growing the graph *beyond* retractions with authors' other papers + `CITES` edges is **targeted, not blanket** — see §2.1c below, which supersedes the original "pull each seed author's other papers" framing.
+   - **OpenAlex (`https://api.openalex.org`) — primary.** Free, no API key; just pass `mailto=<your email>` to join the "polite pool". Rate limit ~100k calls/day, ~10 req/s. One JSON call per work returns the three things the CSV lacks together: **per-author affiliations** (`authorships[].institutions`), **ORCID** (`authorships[].author.orcid`), and **citation edges** (`referenced_works` → outgoing `CITES`; `cited_by_api_url` → incoming). Look up directly by DOI (`/works/doi:<doi>`), PMID (`/works/pmid:<id>`), or ORCID. Cursor-paginate an author's works with `cursor=*`, 200/page.
+   - **PubMed E-utilities — secondary / fallback.** Use for records OpenAlex is missing (your CSV has 98% PMID coverage to key off) and to cross-check. Returns XML; API key optional (raises rate 3→10 req/s). Note its citation links (`elink`) are incomplete — don't rely on PubMed for `CITES` edges; that's OpenAlex's job.
+   - Both credentials/params live in `.env.yaml` (see repo root). OpenAlex needs only an email; PubMed key is optional.
+   - **Measured findings from the seed enrichment run (2026-07-17, `graph_processing/extract_enrich.py`, 1,631 clean microbiology papers):**
+     - **PubMed's real role is record/author-list rescue, *not* ORCID top-up.** Across all 1,631 papers PubMed filled **0** missing ORCIDs — OpenAlex's ORCID coverage was a strict superset of PubMed's. PubMed (and then the CSV `Author` column) mattered only for rescuing *author lists* on ~10 withdrawn papers whose author metadata was scrubbed upstream. So keep the fallback chain **OpenAlex → PubMed → CSV**, but expect PubMed to add identities/authorship, not ORCIDs.
+     - **ORCID coverage ≈ 66%** (5,064 of 7,730 authors). The other third have no ORCID and can only be merged by normalized name (weak identity) — this bounds how aggressively author disambiguation / co-author features (below) can rely on hard IDs.
+     - **Data hygiene matters:** 386 of 2,035 nominally-microbiology rows carried an invalid PMID (`0`) and 41 a sentinel DOI (`unavailable`); the loader must require a real DOI (`10.…`) **and** a numeric non-zero PMID or it produces author-less orphan papers.
+
+   **1b. Author identity — instance-based, NO merge (added 2026-07-17; implemented on Neo4j).** Two distinct identity problems drove this redesign, which replaces the merged `Author` node:
+   - **Problem A — fragmentation:** one real person appears as many nodes (ORCID'd + name-only, or name spelled differently). *Under-merging.*
+   - **Problem B — mis-assignment:** OpenAlex sometimes stamps the *wrong* same-named person's ORCID onto a paper, attaching a retraction to an innocent researcher — the §0 defamation risk. **Confirmed live:** a "Bing Liu" dental retraction carried a materials-scientist's ORCID (verified against his own ORCID record, which claimed only a *Coatings* paper).
+
+   Because every source is fallible — ORCID employment fields are optional, PubMed has same-name collisions, OpenAlex mis-assigns — **we never merge authors.** Design:
+   - **One `AuthorInstance` per authorship** (10,050); nothing is collapsed, *not even by ORCID*.
+   - **Identity = a reversible weighted edge layer** `PROBABLY_SAME_AS`. ORCID is a *low-trust* signal (Problem B), so a **conflicting ORCID lowers confidence, it does not veto** — and the low-confidence "conflict + shared co-authors" case is itself the mis-assignment signature to review. Confidence tiers (hand-set **ranking priors**, not calibrated probabilities — their job is ordering for the cluster threshold):
+
+     | basis | conf | signal |
+     |---|---|---|
+     | `orcid_match` | 0.97 | same ORCID (strongest; <1.0 because OpenAlex can mis-assign) |
+     | `name_coauthor` | 0.70–0.90 | same name + shared co-authors |
+     | `name_institution` | ~0.50 | same name + shared institution |
+     | `name_only` | ~0.35 | same name, nothing else |
+     | `name_orcid_conflict` | 0.05–0.14 | *different* ORCIDs — lowest, still recorded |
+
+   - **Hybrid edge structure:** same-ORCID groups are a spanning tree (k-1 edges, lossless at flat 0.97), name links stay full pairwise. Cuts Raoult (227 instances) from 25,651 clique edges to 226 with *identical* clusters; 5,133 edges total.
+   - **Soft resolution:** weakly-connected-components over edges ≥ threshold (default 0.70) → a **recomputable** `cluster_id` (the "probable person"); 7,713 clusters. Downstream features resolve over clusters, never over a physical merge.
+   - **Coherence flag (review-only):** the conflict tier can't see a *same*-ORCID mis-assignment (an innocent given a prolific namesake's ORCID clusters at 0.97, no conflict). Such an instance betrays itself by sharing **neither** a co-author **nor** an institution with its cluster → `coherence_outlier=true`, ranked by cluster size. **It is a hypothesis, never an action — a legitimate institution move is structurally identical to a mis-assignment.** Worked example: **Ashok Pandey** was flagged as a size-12 outlier (a 2019 IITR paper amid NIIST papers); his CV confirms he *moved* CSIR-NIIST → IITR in 2017 — a **false positive**, a real career change. Cheap resolver: the ORCID-record check (`orcid_client.py`) — does his ORCID *claim* the paper? (Note: an empty/incomplete ORCID works list can't disprove authorship — measured false-positive trap; ~66% ORCID coverage, records often sparse.)
+   - **Adjudication re-expressed at the right grain:** per-instance fact `on_misconduct_paper` (+ `misconduct_reasons`) with the full chain `(:AuthorInstance)-[:WROTE]->(:Paper)-[:RETRACTED_FOR]->(:Reason)`, plus a derived, reviewable `cluster_adjudicated` on the probable person — always paired with `cluster_misconduct_dois` (the specific triggering paper(s), added 2026-07-17 after the Hiroshi Asakura case; see §0 principle 4 — same person ≠ same responsibility, and author role differs paper to paper). 201 adjudicated probable-persons — matches the old merged count, with **0** resting solely on an unreviewed coherence-outlier instance.
+   - **Confirmations (added 2026-07-17):** a third override category alongside splits/merges — a human reviews a `coherence_outlier` and confirms it's genuinely one person (career move, not mis-assignment); no graph change needed, but the decision is still recorded (`identity_overrides.yaml` → `confirmations`, keyed by ORCID) so the same pair doesn't keep resurfacing in the review report on every re-run. Sets `coherence_reviewed`/`coherence_verdict` on the node; the raw `coherence_outlier` signal is left untouched. Two confirmed cases so far: **Ashok Pandey** (CSIR-NIIST → IITR, 2017) and **Hiroshi Asakura / 朝倉宏** (Obihiro University → National Institute of Health Sciences; verified via researchmap.jp profile `read0164939` and J-GLOBAL ID `200901058605650763`) — both false positives on the coherence flag, i.e. the flag is working as a review trigger, not an accusation.
+   - **Batch review of all 31 strong outliers (completed 2026-07-17).** Worked through every remaining `cluster_size>=3` unreviewed coherence outlier from the targeted-expansion run (`import_cypher.txt` §5g). **Method refinement:** (1) first ask the ORCID's own claimed-works list (`orcid_client.py --has-doi`) whether it claims the flagged DOI — 7 cases resolved this way as direct first-party confirmations (Yuen, Malafaia, Ko, Kumar, Rajendran, Ahmad, and one of Zhang's two flagged papers); (2) where ORCID was silent/sparse (the common case — ~66% coverage), cross-checked the flagged paper's actual per-author institution (OpenAlex `authorships`) against the cluster's core institution/specialty — a match strongly indicates the coherence flag is mis-triggering on sparse coauthor-overlap data rather than a real mis-assignment (11 more cases confirmed this way: Collins's 1985 RSV paper, Pease, Ćirić, DiNapoli, Umar, Asad, Yang, Xu, Matsuyama, Sarker, Mandal), while a clean institution *mismatch* is strong split evidence (14 splits: Collins's Sorafenib/TACE2 paper — a different, UK-based MBBS clinician; Zhang's JAMA anesthesia paper — not even in the trial's named author list, a "RAGA Study Investigators" collaborator-group name collision; all 4 Shin-Hee Kim outliers — 4 *different* institutions from each other, an extreme common-name collision; all 4 Naoki Mori outliers — Rockefeller/Kyoto Pharma/USC, another common-name collision; all 3 Pan Wu outliers — 3 different institutions; Wen-Jun Li's bacterial-typing review — CNRS Marseille vs. his Chinese institutions, lower-confidence split given topical adjacency). **Result:** 18 new ORCID-keyed confirmations + 14 new content-keyed splits, replayed through the full pipeline (`build_instances → apply_overrides → expand_targets → apply_overrides (2nd pass, since all 14 splits targeted expansion-sourced instances, which only exist after `expand_targets.py` runs) → link_instances → cluster_instances → mark_adjudication`); the §5g report went from 31 → **0** strong unreviewed outliers, adjudicated-cluster count unchanged at 201. **Pipeline gotcha discovered:** `build_instances.py` unconditionally `DETACH DELETE`s all `AuthorInstance` nodes including expansion-sourced ones, and `expand_targets.py` skips re-fetching any paper whose DOI already exists — so re-running `build_instances.py` on a graph that already has expansion data silently orphans those Paper nodes (author-less). Recovery: delete the orphaned `source:'expansion'` Paper nodes with no `WROTE` edges, then re-run `link_instances → cluster_instances` (to restore `cluster_id`, which `expand_targets.py`'s target-selection query depends on) before `expand_targets.py` can properly re-fetch them. **Do not re-run `build_instances.py` on a live graph that already has expansion data** — it's only safe on a fresh/seed-only graph.
+   - **Corrections are data, not surgery:** `data/graph/identity_overrides.yaml` holds human `splits` (this authorship is a different person → neutralize its mis-assigned ORCID to `orcid_raw`) and `merges` (these are the same person → forced `human_verified` edge, conf 1.0). Matched by **content** (doi+name), **replayed every run**, so the graph is a pure function of *(OpenAlex source + overrides)* — idempotent, reversible, provenance-preserving. **Fixes = edit-file + recompute, never a live-graph edit.**
+
+   **Pipeline (idempotent, run in order):** `build_instances.py → apply_overrides.py → link_instances.py → cluster_instances.py → mark_adjudication.py` (all in `graph_processing/`).
+
+   **Deliberate trade-off:** genuine same-person links with no shared ORCID *and* no shared co-authors *and* different affiliations (e.g. two "Sixing Huang" papers from different career stages) are **not** drawn — the accepted false-negative cost of never asserting a merge. Downstream human/AI closes those via `merges`.
+
+   **1c. Targeted graph expansion (added 2026-07-17, `graph_processing/expand_targets.py`).** Deliberately **not** a blanket "pull every seed author's full output" — that casts a big net senselessly. Instead, go after the **frequent-retraction authors and their high-impact not-yet-retracted papers**, since those are the actual review priority:
+   - **Targets** = the top-N probable-person clusters (§2.1b) ranked by retracted-paper count (e.g. Raoult 28, Siba K. Samal 18, Ashok Pandey 12, …). A cluster qualifies as a target only if it resolves to a single ORCID (guaranteed by the ≥0.70 clustering threshold — two different ORCIDs never share a cluster).
+   - **One OpenAlex call per target:** `/works?filter=author.orcid:<orcid>,is_retracted:false&sort=cited_by_count:desc&per-page=K` — the K most-cited non-retracted works for that person. K=25 by default; optional `--min-year` biases toward recent, reviewable work over old highly-cited reviews.
+   - **One hop, then stop:** each new candidate paper's full authorship becomes `AuthorInstance` + `WROTE` + `AFFILIATED_WITH` (co-authors are needed for the co-author features), plus `PUBLISHED_IN`. Co-authors' *own* other papers are **not** recursively pulled — that boundary is what keeps this targeted instead of exponential.
+   - **`CITES` edges** are added from each candidate to any paper **already in the graph** (matched on OpenAlex id) — this is the highest-value edge the expansion adds, since it directly powers the `retracted-citation-checker` sensor (Phase 4 #1) and the Tier-A "citations to retracted papers" feature.
+   - **Validated (2026-07-17, top-4 targets, K=25):** 96 new candidate papers, 826 new authorship instances, 11 `CITES` edges to papers already in the graph — **7 to retracted papers, 4 to other not-yet-retracted candidates** (a citation chain of suspicion, not just single flags). Example: Siba K. Samal's *"Newcastle Disease Virus as a Vaccine Vector"* (144 citations) cites **four** different retracted NDV papers. New instances flow through the §2.1b identity pipeline unchanged (no new identity logic needed) — Raoult's cluster grew 227→252 instances, still one cluster; adjudicated count stayed exactly 201.
+   - **Idempotent; MERGE throughout; tagged `source:'expansion'`** on new Paper/AuthorInstance nodes for traceability. Must run *after* `build_instances.py` (which rebuilds seed instances from `graph.json` and would otherwise wipe expansion authorships).
+
+   **Pipeline (full, idempotent, run in order):** `build_instances.py → apply_overrides.py → expand_targets.py → link_instances.py → cluster_instances.py → mark_adjudication.py`.
+
+2. **Node property prediction — tiered, and be realistic.** Ship the explainable heuristic first; treat learned node classification as a later, separately-decided step.
+   - **Tier A — heuristic graph features (implemented 2026-07-18, `graph_processing/tier_a_scoring.py` + `flag_evidence_report.py`).** Per not-yet-retracted candidate paper (834 in the current graph), the weighted score combines Phase-4 sensor flag counts with two **explainable graph features computed in pure Cypher** (no GDS needed for these): `coauthor_other_misconduct` (weight 1.5/co-author) — the candidate shares a `PROBABLY_SAME_AS` cluster with a co-author who wrote a paper retracted for a **misconduct-signal reason** (Paper Mill, Fabrication, Image/Results Manipulation, ...; the broad set, not the narrower `on_misconduct_paper` official-investigation/ORI-only flag — see §2.1b, and note this is content-adjacent to but distinct from that field), and `journal_retr_rate` (weight 2.0) — the paper's journal's measured retraction rate in this graph. Every point still maps to a named, sourced 🚩 (`flag_evidence_report.py` names the specific co-author and the specific misconduct DOI/reason). **Measured impact:** on the top-50 ranking, `coauthor_other_misconduct` reshaped the order significantly — e.g. a Leishmania donovani paper (`10.3389/fimmu.2018.00063`) jumped to rank 2 on the strength of 6 named co-authors sharing a cluster with a Manipulation-of-Images retraction, a signal the sensor-only score had been blind to (only 1 citation-based flag). (e) citations-to-retracted-papers is covered by the existing `retracted-citation-checker` sensor reading `CITES` edges (§2.1c). (b) shortest-path-distance and (d) shared-institution remain unbuilt (reserved, same pattern as (a)/(c) if picked up later); (f) publication-burst also unbuilt.
+   - **Tier B — GDS node classification (built + evaluated 2026-07-18, `graph_processing/gds_node_classification.py`).** Neo4j GDS 2026.05.0 was confirmed installed (`gds.version()`); a full `gds.beta.pipeline.nodeClassification` pipeline was built: project a paper-paper graph (edges = shared-probable-person co-authorship [~53k pairs] + `CITES` [82], undirected) → FastRP(dim 64) + degree + PageRank node embeddings, combined with the same domain features as Tier A → auto-selected LogisticRegression/RandomForest → train/predict. **Labeling design (avoids the obvious leakage trap):** trained only on the 1,244 *retracted* papers, class 1 = misconduct-signal reason (281, 22.6%) vs class 0 = other retraction reason (963) — since both classes are already "near a retraction" by construction, the expansion-sampling bias does not separate the two training classes, so this labeling is not leaky for this specific target (unlike training retracted-vs-not directly, which would be). **Measured result — a clear negative/weak finding, kept because it settles the question for future readers:** held-out test accuracy 0.823 (barely above the 0.774 majority-class baseline), F1(misconduct-class) only 0.353 (precision 0.833, recall 0.224 — misses ~78% of misconduct-labeled test cases). Applied to the 834 candidates, `gds_misconduct_prob` never exceeds **0.54** (mean 0.38, stdev 0.11) — the model stays unconfident on every candidate, the domain-shift signature you'd expect training-on-retracted/predicting-on-not-yet-retracted. Top-ranked candidates by this prior visibly cluster by author-neighborhood (Leishmania/kala-azar group, NDV-vaccine group) rather than by any interpretable fraud signal — i.e. FastRP is substantially learning "which co-authorship neighborhood is this," which the explainable `coauthor_other_misconduct` feature already captures directly and legibly. **Decision: keep `gds_misconduct_prob` wired into the graph and the triage CSV as a labeled, non-scored secondary column only — it never enters the weighted Tier-A score.** Re-evaluate if the labeled-retraction set grows substantially (currently 1,244 papers is thin for FastRP+RF) or if a differently-shaped target (e.g. predicting retraction reason *category* rather than a binary) is tried.
+3. **Label carefully.** Positive class = papers retracted for *misconduct* reasons (Paper Mill, Fabrication, Image Duplication, Compromised Peer Review), **not** all retractions. This is the concrete payoff of the §0 framing. (Confirmed as the Tier-B label design above.)
+
+*Exit criteria:* a scored table of candidate papers with per-feature contributions. **Met 2026-07-18** — `data/tier_a_triage_top50.csv` (score + full signal breakdown, including the `gds_misconduct_prob`/`gds_flagged` secondary columns) and `data/flag_evidence_report_top.json` (named, sourced evidence per contributing signal) cover all 834 not-yet-retracted candidates.
+
+### Phase 3 — Numeric forensics with paperconan (Claude skill)
+**Deliverable:** a numeric-forensics report for each top-N suspicious paper *that has machine-readable data files*.
+
+- **What paperconan actually does (verified against its `detectors.md`):** it is a *numeric-forensics* skill, not a general "read the paper" AI. It runs ~30 detectors over the paper's **raw data tables** — the supplementary `.xlsx`/`.csv` grids — looking for fabrication fingerprints: identical/constant-offset/constant-ratio columns, repeated values, decimal-tail clustering, cross-sheet value reuse, and **GRIM/GRIMMER** checks (whether a reported mean/SD is even arithmetically possible for the stated n). Its own principle is "signal not verdict", which matches §0.
+- **It is complementary to Phase 4, not overlapping.** paperconan inspects the *numbers inside the data files*; the Phase 4 sensors inspect the paper's *citations, in-text statistics, and online reputation*. Run both. Note the one adjacency: paperconan's GRIM/GRIMMER + decimal-clustering are statistical checks in the same family as Phase 4's `p-value-hacking-detector`, but they test a different thing (arithmetic consistency of summary stats vs. p-values clustering under 0.05) — no redundancy; keep both.
+- **Input requirement changes the handoff.** paperconan needs the **supplementary data files**, not the PDF prose or just a DOI. So the Phase 2 → Phase 3 queue must point at (or fetch) each paper's supplementary datasets. **Coverage is inherently limited:** many papers ship no machine-readable data (figures only, PDF tables, or nothing), and those simply can't be run through paperconan — that's expected, not a bug. Record "no data files available" as a distinct outcome in the UI rather than a clean pass.
+- **How it runs:** it's a Claude skill, not a library the pipeline imports. It runs inside Claude — a **Claude routine** (scheduled) or an **interactive session** — on the top-N. The pipeline only *produces the queue and consumes the verdict*: (a) Phase 2 writes the top-N (with pointers to their data files) to a small file/table the routine reads; (b) paperconan runs per paper and returns its report; (c) that report is written back onto the `Paper` node / results table for the UI. Keep the exchange as plain files/DB rows so it works identically whether a routine or a human triggers it. Run only on the top-N (it's expensive). No API key in `.env.yaml` — paperconan uses whatever model the Claude session/routine runs under.
+
+### Phase 4 — Flag sensors as Claude skills
+**Deliverable:** reusable skills, each emitting structured `{flag, severity, evidence, source_url}`.
+
+Each skill is an independent "sensor" that adds 🚩s. **Design rule:** each returns *evidence, not a verdict*; the scoring engine turns skill output into 🚩 counts. Sensors are grouped by signal-per-effort. Which reasons they target is anchored to the measured Retraction Watch reason counts for the bio slice — Paper Mill (11,796), compromised/concerns peer review (~11k), Computer-Generated Content (9,144), image duplication (5,458), plagiarism euphemisms (3,747) — so we prioritize sensors that hit the biggest categories.
+
+**Core set (original four)**
+1. **`retracted-citation-checker`** — does the paper cite any paper that is `is_retracted` in our graph (or in Retraction Watch)? Strong signal if citing *after* the retraction date.
+2. **`p-value-hacking-detector`** — scan reported p-values for suspicious clustering just under 0.05 (p-curve / caliper test on extracted stats). Flags "0.048, 0.049, 0.047" patterns. *Distinct from paperconan's GRIM/GRIMMER + digit stats (different test — keep both).*
+3. **`pubpeer-comment-scanner`** — query PubPeer for the DOI; surface community comments (PubPeer has an API/lookup). Comments there are the single highest-yield human signal.
+4. **`web-suspicion-search`** — web search for the title/DOI + "concerns/retraction/image duplication" on blogs, forums, For Better Science, etc. Lower precision; tag as weak.
+
+**Tier 1 — high signal, cheap, build right after the core set**
+5. **`tortured-phrases-detector`** — paper-mill fingerprint #1. Detects garbled paraphrase synonyms ("bosom peril" = breast cancer, "counterfeit consciousness" = AI) via the known tortured-phrase list (Cabanac's Problematic Paper Screener). Near-zero false positives. Targets the 11,796 paper-mill reason.
+6. **`ai-text-tell-detector`** — regex/LLM scan for AI-generation giveaways left in published text ("As an AI language model", "Regenerate response", "Certainly, here is", "my last knowledge update"). Very high precision. Targets the 9,144 Computer-Generated Content reason.
+7. **`reference-integrity-checker`** — resolve every cited reference against Crossref/PubMed. *Nonexistent* references signal AI-fabricated/mill papers; broken/mismatched ones are a softer flag. Complements #1 (that checks citation *validity*; this checks *existence*).
+
+**Tier 2 — field-specific, high value for microbiology**
+8. **`nucleotide-sequence-sanity`** (Seek-&-Blastn style) — extract stated nucleotide sequences (primers, siRNA/shRNA) and BLAST them; flag where the sequence doesn't match the gene it's claimed to target (the Byrne & Labbé method). Uniquely powerful for molecular-biology/microbiology gene papers, a large share of mill output. Higher effort: needs sequence extraction + BLAST API.
+9. **`cell-line-and-reagent-check`** — cross-check named cell lines against the ICLAC register of misidentified/contaminated lines; validate that antibody/reagent RRIDs and catalog numbers exist. Bio-specific, moderate effort.
+
+**Tier 3 — contextual / metadata**
+10. **`journal-integrity-check`** — is the journal predatory, absent from DOAJ, or **delisted from Scopus/Web of Science**? Delisting often follows mill infiltration. Also flag implausibly fast submission→acceptance turnaround (proxy for the ~11k compromised-peer-review cases).
+11. **`impossible-values-check`** — logical impossibilities only: percentages >100, negative counts, SD=0, means outside the possible range, sample sizes that don't reconcile across tables. *Keep to logical impossibilities — leave GRIM/GRIMMER, terminal-digit, and decimal-clustering statistics to paperconan (Phase 3) to avoid duplication.*
+
+**Deliberately out of scope (reserved slots, not built in POC)**
+- **`image-duplication-flag`** — high value (5,458 image-duplication retractions) but needs figure extraction + forensics; reserve the slot.
+- **Hyperprolific-author / co-authorship-cluster signals** — belong in Phase 2 graph features, not a per-paper skill.
+- **Any statistic paperconan already computes** (GRIM/GRIMMER, terminal-digit, decimal clustering) — redundant.
+
+**Recommended minimal high-yield set to ship first:** core #1–#4, then Tier 1 (#5–#7), then #8 as the field-specific centerpiece once the basics work.
+
+### Phase 5 — HTMX review frontend
+**Deliverable:** a triage table for a human reviewer.
+
+- **Backend:** FastAPI serving Jinja2 templates + HTMX partials, reading from the graph + a small results table.
+- **Table columns:** Title · DOI (link) · Journal · Risk score (🚩 count, sortable, default sort = most flags first) · per-flag breakdown (hover/expand for evidence + source links) · paperconan AI opinion (expandable) · **reviewer decision** (buttons: `Legit` / `Needs deeper look` / `Confirmed problematic`).
+- HTMX handles: sort, expand-row for evidence, and posting the reviewer decision back (which becomes labeled training data for Phase 2 Tier B — closing the loop).
+- **Copy discipline:** header reads "Papers flagged for human review". No cell ever asserts fraud. Each 🚩 links to its evidence.
+
+---
+
+## 5. Suggested milestones / order of work
+
+1. **M1:** CSV → graph for Microbiology-only (2,100 rows). Inspect with a few Cypher queries. *(Phase 1)*
+2. **M2:** OpenAlex enrichment for those authors; graph grows to include non-retracted papers. *(Phase 2.1)*
+3. **M3:** Tier-A heuristic scoring + a static HTML dump of the top 50. *(Phase 2.2 + minimal 5)*
+4. **M4:** Wire in the cheapest high-signal sensors first — `retracted-citation-checker`, `pubpeer-comment-scanner`, `tortured-phrases-detector`, `ai-text-tell-detector` (all low-effort, all hit top reasons). Add `reference-integrity-checker` next, then `nucleotide-sequence-sanity` as the microbiology centerpiece. *(Phase 4)*
+5. **M5:** FastAPI + HTMX interactive table with reviewer decisions. *(Phase 5)*
+6. **M6:** paperconan skill (routine or interactive session) deep-dive on top-N; embeddings/classifier if warranted. *(Phase 3 + 2.3)*
+
+Ship M1–M3 before adding sophistication; each milestone is independently demoable.
+
+---
+
+## 6. Open questions to resolve early
+
+- **Supplementary-data acquisition for paperconan** — *resolved what it needs* (machine-readable `.xlsx`/`.csv` data files, not the PDF). Open part: how to *fetch* those files at scale (publisher supplementary links, OpenAlex/Crossref don't host them), and what fraction of the top-N will actually have them. (Determines real Phase 3 coverage.)
+- **Enrichment sources — decided: OpenAlex primary, PubMed secondary.** OpenAlex gives ORCID + per-author affiliation + citation edges in one keyless call; PubMed is the fallback for missing records and a cross-check. Still confirm OpenAlex journal coverage for your target sources.
+- **PubPeer access** — API terms and rate limits for `pubpeer-comment-scanner`.
+- **Identity resolution** — **RESOLVED (2026-07-17, see §2.1b): never merge.** Instance-based model (one `AuthorInstance` per authorship) + a reversible `PROBABLY_SAME_AS` confidence layer + soft clustering into "probable persons"; human corrections via `identity_overrides.yaml`, replayed every run. ORCID is treated as a low-trust signal because OpenAlex mis-assigns it, so conflicting ORCIDs *lower confidence* rather than veto a link.
+- **Graph engine** — *updated 2026-07-17:* running on **Neo4j** for now (see §2 engine update) — all of §2.1b/c is built and live there; `.env.yaml` `graph_db.engine` defaults to `"neo4j"`. Original reasoning (start on LadybugDB, revisit at Tier B/C) is preserved in §2 for reference; Tier B/C is moot on the engine question now since Neo4j + GDS was the eventual Tier B/C target anyway. Schema remains portable either way.
+
+---
+
+## 7. Risks
+
+- **False accusations / defamation.** Mitigated by §0 framing, human-in-the-loop gate, evidence-linked flags, and never publishing scores as conclusions. Keep the review queue private during POC.
+- **Name-collision errors** inflating an author's apparent retraction history. Mitigated by DOI/PMID/ORCID-based identity, weak-weighting name-only matches, and the no-merge instance model (§2.1b).
+- **OpenAlex ORCID mis-assignment.** OpenAlex sometimes stamps a same-named person's ORCID onto the wrong paper, which can attach a retraction (or misconduct finding) to an innocent researcher. Mitigated by the instance-based no-merge model (§2.1b): mis-assignment is a *visible, droppable* edge with provenance (`orcid_raw`), never a silent merge; the `coherence_outlier` flag surfaces the same-ORCID case for human review; conflicting-ORCID pairs get lowest confidence. **Detection is imperfect** — a career move looks identical to a mis-assignment (e.g. Ashok Pandey NIIST→IITR), so it is always human-reviewed, never auto-corrected. The authoritative check is the researcher's own ORCID works list, but that only *confirms* (absence ≠ mis-assignment, since ORCID records are often incomplete).
+- **Overfitting to Retraction Watch's discovery bias** — the DB reflects what *got caught*, skewed toward certain publishers/regions. A model trained on it predicts "resembles a caught paper", not "is fraudulent". State this limitation in any writeup.
+- **Skill precision** — web-search and p-value sensors are noisy; weight them low and always show evidence.

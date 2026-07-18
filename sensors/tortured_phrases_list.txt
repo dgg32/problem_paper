@@ -1,0 +1,789 @@
+# Tortured phrases list for sensors/tortured_phrases_detector.py
+# Source: manually curated seed + PPS "Favourite Tortured Phrases"
+# Downloaded: 2026-07-17 from https://www.irit.fr/~Guillaume.Cabanac/problematic-paper-screener/fingerprints
+AI calculation
+Android stage
+Bluetooth Low Vitality
+Euclidean separation
+Gabor channel
+Gaussian conveyance
+K-mean bunching
+PC vision
+Simple to-Computerized Converters
+Symmetrical recurrence division multiplexing
+acknowledgment framework
+acquired qualities
+ancient rarities
+completely associated layer
+component extraction
+concealed state
+conveyance framework
+convolutional neural system
+crippled individuals
+dielectric consistent
+dielectric steady
+dim level co-event lattice
+directing convention
+discourse acknowledgment
+discourse signal
+discourse to-content
+example acknowledgment
+facial acknowledgment
+fix reception apparatus
+fluffy framework
+fluffy systems
+fourth era (4G)
+getting ready and testing
+heart ailments
+hereditary calculation
+histogram evening out
+histogram levelling
+hyperspectral symbolism
+impedance coordinating
+info and yield
+info information
+info picture
+information mining
+information picture
+information stockpiling
+information the executive
+informational collection
+informational index
+inserted framework
+installed framework
+installing vector
+invulnerable reaction
+k-implies bunching
+k-implies grouping
+keen framework
+microstrip fix reception apparatus
+misfortune digression
+misfortune rate
+nature of administration
+non straight
+optical character acknowledgment
+organize lifetime
+otherworldly effectiveness
+parcel misfortune
+phony picture
+picture differentiate
+picture division
+picture handling calculation
+picture inscribing
+picture preparing
+plant ailments
+preparation dataset
+preparation informational index
+preparing information
+radio recurrence
+receiving wire
+recognizable proof
+records arrangement
+recurrence band
+recurrence range
+recurrence scope
+remote sensor arrange
+remote sensor organize
+restrictive likelihood
+return misfortune
+second-age (2G)
+shading histogram
+shading pictures
+shading space
+shrewd sensors
+sign to clamor
+specially appointed system
+steering convention
+trademark highlights
+unearthly proficiency
+unique finger impression
+voice acknowledgment
+wi fi sensor network
+yield pictures
+CO2 emanation
+GHG discharge
+Huge data analytics
+PV board
+angle supported trees
+brilliant gadget
+brilliant home
+brilliant lattice
+brilliant metering
+characterization and relapse
+characterization relapse
+cooling framework
+earth-wide temperature boost
+energy proficiency
+energy the executives
+field programmable entryway exhibit
+force lattice
+fourth modern upset
+huge information
+incorporated circuits
+keen city
+keen gadget
+keen home
+keen lattice
+keen matrix
+keen urban area
+man-made brainpower
+man-made reasoning
+neural organization
+ozone depleting substance outflows
+prescient investigation
+prescient model
+savvy cell phones
+savvy city
+savvy contract
+savvy framework
+savvy home
+savvy metering
+shrewd city
+shrewd home
+shrewd lattice
+shrewd metering
+shrewd transportation
+shrewd urban communities
+sunlight-based force
+uphold vector machine
+worldwide temperature alteration
+profound learning
+Fourier transmission infrared
+creepy crawlies
+vitality utilization
+Fourier change
+vigorous vitality
+profound layers
+counterfeit news
+optimistic impact
+profound education
+profound model
+warm properties
+vitality source
+blunder rate
+pixel esteems
+counterfeit neural
+Fourier transfer infrared (FT-IR)
+limit esteem
+vitality productivity
+human blunder
+randomized controlled preliminary
+warm conductivity
+edge esteem
+profound convolutional
+weight esteem
+molecule swarm
+p esteem
+electrical vitality
+naive bias
+bosom disease
+bosom malignant
+amino corrosive
+warm radiation
+irregularity identification
+vitality effective
+profound neural networks
+profound CNN
+renewable vitality
+flag classification
+square mistake
+irregular timberland
+random woodland
+vitality proficient
+swarm improvement
+profound neural organization
+irregular woodland
+squared mistake
+warmth move
+counterfeit neural system
+profound organizations
+random wood
+flag handling
+profound neural system
+electric vitality
+gullible Bayes
+counterfeit insight
+remaining vitality
+wellness esteem
+credulous Bayes
+innocent Bayes
+irregular walks
+warmth source
+disappointment rate
+sun-oriented cell
+standard blunder
+vitality sparing
+wellspring of vitality
+esteem internet
+square blunder
+irregular request
+irregular backwoods
+bosom malignancy
+sun oriented energy
+irregular forest
+quick Fourier transform
+esteem chain
+counterfeit neural organization
+squared blunder
+guileless Bayes
+warmth transfer
+vitality creation
+wind vitality
+genuine esteemed
+vitality efficiency
+irregularity recognition
+standard mistake
+random wooded area
+warmth exchange
+profound deep learning
+sulfuric corrosive
+irregular woods
+coefficient esteem
+irregularity discovery
+warmth exchanger
+framework disappointment
+nucleic corrosive
+flag preparing
+sun-powered vitality
+profound brain organization
+lactic corrosive
+utilization of vitality
+importance esteem
+mean square blunder
+spare vitality
+surface vitality
+Gaussian commotion
+vitality thickness
+profound figuring
+commotion levels
+swarm streamlining
+vitality necessities
+ascorbic corrosive
+profound brain network
+renal disappointment
+vitality framework
+haze processing
+esteem creation
+counterfeit consciousness
+sign to commotion
+sunlight-based vitality
+random stroll
+fast Fourier change
+likelihood esteem
+counterfeit brain organization
+Joule warming
+component esteems
+foundation commotion
+kidney disappointment
+discrete Fourier change
+mist registering
+haze figuring
+data blunder
+molecule swarm optimization
+atomic vitality
+hydrochloric corrosive
+leftover vitality
+mist hub
+warmth transmission
+profound training
+commotion decrease
+haze registering
+carboxylic corrosive
+mist figuring
+nitric corrosive
+review esteem
+ECG flag
+open mists
+vitality devoured
+vitality market
+warm camera
+warm capacity
+Fourier remodel
+warmth transport
+k esteem
+exactness esteem
+commotion evacuation
+motor vitality
+profound gaining
+respiratory disappointment
+bosom tumor
+sound flag
+threshold esteem
+warm solace
+eigen esteems
+warmth map
+word blunders
+quick Fourier change
+commotion expulsion
+R2 esteem
+Fourier rework
+subterranean insect state
+discourse flag
+organic corrosive
+folic corrosive
+vitality meter
+vitality move
+optimistic and important
+counterfeit knowledge
+elective vitality
+bosom growth
+resource esteems
+gastric corrosive
+blunder term
+malicious hobbies
+organ disappointment
+phosphoric corrosive
+random backwoods
+random timberland
+flag to commotion
+counterfeit intelligence
+private mists
+hyaluronic corrosive
+warm diffusivity
+salt and peppers commotion
+blunder signal
+blunder pace
+Gaussian haze
+vitality utilize
+input esteems
+gear disappointment
+forecast blunder
+bosom milk
+sun oriented force
+warmth trade
+acrylic corrosive
+counterfeit treatment
+subterranean insect settlement
+profound reinforcement learning
+profound conviction organization
+profound mastering
+irregular clamor
+formic corrosive
+flag to clamor
+vitality dispersive
+irregular strolls
+atom swarm
+restricting vitality
+subterranean insect province
+accuracy esteem
+commotion contamination
+fuel vitality
+bit blunder rate
+AUC esteem
+sulfonic corrosive
+signal to commotion
+credulous Bayesian
+warmness switch
+voice flag
+mean outright mistake
+liver disappointment
+warmth dissipation
+misfortune esteem
+dot commotion
+irregular number generator
+Bayesian arrangement
+haze finding
+calorific esteem
+Community-oriented separating
+initiation vitality
+profound learning draws near
+pressure vitality
+arbitrary esteem
+to expel commotion
+sensor disappointment
+oxalic corrosive
+amino corrosive groupings
+deoxyribonucleic corrosive
+warm exchange
+irregular worth
+mean outright blunder
+benzoic corrosive
+server disappointment
+vitality devouring
+enactment vitality
+cardiovascular disappointment
+glutamic corrosive
+missing esteem
+warmth capability
+aspartic corrosive
+bosom carcinoma
+ghostly information
+methacrylic corrosive
+R esteems
+picture esteem
+counterfeit democratic
+warmth movement
+profound conviction network
+bosom thickness
+boric corrosive
+ribonucleic corrosive
+irregular esteem
+warm picture
+band hole vitality
+Prophet database
+butyric corrosive
+vitality age
+mycolic corrosive
+motivation commotion
+warmth resource
+ghastly proficiency
+unmistakable layer
+client lifetime esteem
+commotion picture
+hydrofluoric corrosive
+profound autoencoder
+trichloroacetic corrosive
+single point disappointment
+molecule swarm enhancement (PSO)
+pixel force esteem
+reflected vitality
+acetic corrosive
+greasy corrosive
+warmness map
+cruel squared mistake
+moo vitality
+evacuates the commotion
+blunder amendment
+ghostly highlight
+hyper ghastly
+insect settlement streamlining
+corrosive phosphatase
+counterfeit honey bee state
+corrosive mine seepage
+proficiency esteem
+ghastly productivity
+preparation blunders
+measure of blunder
+bosom picture
+Fast Fourier Theorem
+citric corrosive
+warm image
+irregular hunt
+cruel esteem
+vitality bills
+inactive warmth
+pessimistic collision
+DDoS ambushes
+longitude esteems
+carbonic corrosive
+key-esteem matches
+bosom peril
+trademark flag
+mean absolute blunders
+tidal vitality
+ghastly investigation
+profound conviction systems
+ghostly investigation
+protection of vitality
+Gibbs free vitality
+ignorant Bayes
+innocent Bayesian
+Fourier rework Infrared
+blunder rectifying
+warm subject matter
+hand flags
+gullible Bayesian
+Fourier Fourier (FFT)
+ghastly highlights
+alpha-linolenic corrosive
+organization ambush
+insect state improvement
+mean outright rate blunder
+cruel square mistake
+haze of things
+warm Grashof
+pipeline disappointment
+fixation esteem
+unsophisticated Bayes
+counterfeit honey bee province
+type II blunder
+ghastly grouping
+ahead blunder correction
+warmth esteem
+creepy event
+irregular choice woods
+system disappointment
+brief time frame Fourier
+sincere Bayes
+perchloric corrosive
+convolutional profound
+irregular disappointment
+lung disappointment
+type I blunder
+irregular forests (RF)
+profound deep Convolutional Neural Networks
+blunder framework
+affectability esteem
+renewable vitality utilization
+ghostly grouping
+profound deep CNNs
+lingering commotion
+route disappointment
+cruel outright mistake
+ghostly examination
+acetylsalicylic corrosive
+imply squared blunder
+ingenuous Bayes
+warm observing
+gluconic corrosive
+redox flagging
+commotion cancelation
+profound bore
+warmth of sorption
+irregular maturing
+commotion extent
+fatty corrosive
+Joule warms
+ghostly clustering
+normal mistake rate
+counterfeit alarm
+vessel flagon
+particular esteem decay
+NMR flag
+profoundly saved
+sun oriented warming
+Bronsted corrosive
+boisterous flag
+underground creepy crawly state
+inexperienced Bayes
+commotion flag
+ghostly reach
+sun oriented refining
+chromic corrosive
+random thicket
+ovarian disappointment
+vitality economical
+suggested absolute mistakes
+quick Fourier remodel
+counterfeit gadget
+misleading pessimistic
+power ghastly thickness
+mean supreme blunder
+fake fish swarm
+fitting blunder
+solitary esteem decay
+cardiac disappointment
+impedance commotion
+sincere Bayesian
+random hunt
+lipoteichoic corrosive
+commonsense esteem
+profound RNN
+profoundly association
+unsuspecting Bayes
+alpha mistake edge
+valproic corrosive
+phthalic corrosive
+trusting Bayes
+unmistakable insights
+trifluoroacetic corrosive
+conditional irregular fields
+profound include extraction
+carbolic corrosive
+break down a flag
+corrosive-base response
+motion to commotion
+over the top vitality
+standardized root mean square mistake
+teichoic corrosive
+vitality recuperation framework
+board mistake revision system
+submitting blunders
+prescient blunder
+flag-bearer RNA
+hypochlorous corrosive
+Prophet data set
+conformist adsorbent
+sifted flag
+pre-prepared profound model
+cement disappointment
+reasonableness esteem
+bunching blunder
+underneath this esteem
+Fourier portrayal
+profound remaining organization
+phenylboronic corrosive
+indicator to commotion
+mistake back engendering
+ghastly attributes
+commotion affectability
+wellsprings of electric vitality
+half and half mists
+most pessimistic scenario execution time
+chloroacetic corrosive
+strange esteems
+Fourier metamorphosis
+adjoining pixel esteems
+warmth move capacity
+moo warm conductivity
+profound conviction business enterprise
+profound nervous tissue
+mistake backpropagation calculation
+Exactness and Loss esteem
+one-of-a-kind id esteem
+net resource esteem
+change of blunder
+profound becoming acquainted
+melodic flag
+nonlinear vitality administrator
+corrosive polyacrylic
+commotion expulsion channel
+random choice woodland
+pinnacle vitality
+warmth interchange
+corrosive orange II
+ghastly clustering
+counterfeit control of qualities
+kind II blunder
+lingering vitality of hubs
+ghastly transition
+commotion decrease channel
+artless Bayes
+hybrid vitality system
+ghastly bunching
+Prophet 9i
+blunder adjustment term
+beneficiary’s optimistic curve
+radiation warm flux
+irregular walk (RW)
+territorial normal vitality
+profound brain agencies
+crossbreed mists
+immature Bayes
+benzenesulfonic corrosive
+flag to noise
+complete mistake likelihood
+counterfeit neural system nonlinear autoregressive moving normal
+attractive commotion
+ghostly bunching
+vector mistake amendment strategy
+minimum mandatory vitality
+creepy crawly affectability
+fiery flagging pathways
+kind I blunder
+wellspring of commotion contamination
+spillage vitality recuperation scheme
+tungstic corrosive
+tainting length-mindful irregular woods
+wrong data implantation ambushes
+mean supreme mistake
+hydrobromic corrosive
+wisconsin bosom malignant growth determination
+warm stereo vision
+watchful edge picture esteem
+irregular get right of passage to
+moo warm steadiness
+ribosomal RNA huge subunit
+acknowledge mastercard irregularities
+molecule swarm advancement on minimum middle squares
+anisidine esteem
+restorative flag preparing
+flagging go-betweens
+consonant to commotion rate
+gullible Naive-Bayes
+counterfeit expected field
+sunlight-based PV vitality age framework
+Prophet 11g
+fluoroboric corrosive
+haze enrolling
+corrosive iminodiacetic
+naive Bayes relation based with highlight subset
+ghostly unwinding technique
+relative outright blunder
+irregular number era
+vitality procuring
+profound brought together organization
+vigilant edge picture esteem
+root cruel square mistake of estimation
+dichloroacetic corrosive
+subterranean insect circularity
+profound installing highlights
+time and vitality consuming
+corrosive orange-7
+Prophet information base
+irregular over-testing model
+corrosive nitrilotriacetic
+UWB microwave flags
+bi-random stroll
+profound encyclopedism
+low-commotion enhancement
+chloric corrosive
+extreme against commotion
+profound implanting highlights
+profound guide getting to know
+ribosomal RNA little subunit
+irregular lush territory
+swarm optimized mechanism
+profound repetitive model
+convectively warmed tricky extending sheet
+ghastly based
+small k esteems
+multi-ghostly images
+Bayesian aggregate govern
+amino corrosive sythesis
+leveled expense of vitality
+solitary purpose of disappointment hazard
+erasure blunders
+unmistakable phyla
+radio flag handling
+root imply rectangular blunders
+a single-cloud to multi-mist
+profoundly bound together organization
+blunder proliferated on the contrary request
+underground creepy crawly region
+random lush territory
+unpredictable number esteemed yield picture
+singular esteem disintegration
+swarm perceptive algorithm
+Walsh Hadamard esteem
+shut ghastly fit
+charge card counterfeit trades
+plate warmness trading
+disappointment plane
+bivariate ghastly homotopy examination technique
+sign commotion extent
+quick Fourier exchange
+tumultuous salp swarm
+blunder gathering
+dislodging irregularity strategy (DDM)
+channel determination naive Bayes
+complex-esteemed Gaussian
+face to face unmistakable information
+Teager vitality administrator
+anticipate protest esteems
+moo misfortune of vitality
+ghastly list of capabilities
+underground creepy crawly area
+fake commotions
+Prophet 21c
+p-toluenesulfonic corrosive
+hypofluorous corrosive
+mesylic corrosive
+hydroiodic corrosive
+flag-bearer mRNA
+methanesulfonic corrosive
+fluorosulfuric corrosive
+polystyrene sulfonic corrosive
+underground creepy crawly settlement
+self-arranging counterfeit neural organizations
+Prophet 12c
+tartanic corrosive
+underground creepy crawly province
+Prophet 10g
+hexafluorophosphoric corrosive
+subterranean insect area
+taken advantage of inclination sizes and edge reaction esteems
+subterranean insect region
+profound convolution neural organize
+besylic corrosive
+tosylic corrosive
+esylic corrosive
+fluoroantimonic corrosive
+folinic corrosive
+Prophet 19c
+fluoroacetic corrosive
+chlorous corrosive
+trifluoromethanesulfonic corrosive
+triflic corrosive
+ethanesulfonic corrosive
+Prophet 18c

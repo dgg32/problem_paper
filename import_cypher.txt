@@ -1,0 +1,163 @@
+// ===================================================================
+// Neo4j load — Paper / Journal / Institution / Reason BACKBONE only
+// Source: data/graph/*.tsv produced by graph_processing/extract_enrich.py
+// Schema: plan.md §3
+// ===================================================================
+//
+// SCOPE: this file loads ONLY the retraction backbone (Papers + their Journals,
+// Institutions, Reasons, and the paper-level edges). The AUTHOR / IDENTITY layer
+// is NO LONGER loaded here. It is built by the Python pipeline below, which
+// replaced the old merged `Author` model with the instance-based `AuthorInstance`
+// + `PROBABLY_SAME_AS` identity layer (plan.md §2.1b): authors are never merged;
+// identity is a reversible, weighted edge layer resolved into "probable persons".
+//
+// FULL LOAD ORDER (from scratch)
+// ---------------------------------------------------------------
+//   1. Run THIS file (backbone). It loads Paper/Journal/Institution/Reason.
+//   2. Run the author + identity pipeline (all in graph_processing/, idempotent,
+//      in this order). These read data/graph/graph.json and write straight to
+//      Neo4j over bolt; build_instances.py first deletes any old :Author /
+//      :AuthorInstance nodes, so it is safe to re-run:
+//        python graph_processing/build_instances.py    // AuthorInstance + WROTE + AFFILIATED_WITH
+//        python graph_processing/apply_overrides.py     // human identity SPLITS (data/graph/identity_overrides.yaml)
+//        python graph_processing/link_instances.py       // PROBABLY_SAME_AS edges (+ MERGES from overrides)
+//        python graph_processing/cluster_instances.py     // cluster_id (probable persons) + coherence_outlier
+//        python graph_processing/mark_adjudication.py      // on_misconduct_paper + cluster_adjudicated
+//
+// SETUP for step 1: LOAD CSV reads from the DBMS import dir. Copy the backbone
+// TSVs there (adjust <IMPORT_DIR> to your DBMS import path):
+//   cp data/graph/nodes_paper.tsv data/graph/nodes_journal.tsv \
+//      data/graph/nodes_institution.tsv data/graph/nodes_reason.tsv \
+//      data/graph/rel_published_in.tsv data/graph/rel_involves.tsv \
+//      data/graph/rel_retracted_for.tsv "<IMPORT_DIR>/"
+// Then run this file (Neo4j Browser: paste + run; or cypher-shell < import_cypher.txt).
+//
+// Every load uses MERGE, so this script is idempotent. Fresh start:
+//   MATCH (n) DETACH DELETE n;   // (optional; wipes the whole graph first)
+//
+// NOTE: nodes_author.tsv / rel_wrote.tsv / rel_affiliated_with.tsv are STALE
+// (old merged model) and are intentionally NOT loaded here — the pipeline above
+// supersedes them.
+// ===================================================================
+
+
+// --- 1. Constraints (backbone; author-layer constraints are created by
+//        build_instances.py) --------------------------------------------
+CREATE CONSTRAINT paper_doi    IF NOT EXISTS FOR (p:Paper)       REQUIRE p.doi            IS UNIQUE;
+CREATE CONSTRAINT journal_name IF NOT EXISTS FOR (j:Journal)     REQUIRE j.name           IS UNIQUE;
+CREATE CONSTRAINT inst_id      IF NOT EXISTS FOR (i:Institution) REQUIRE i.institution_id IS UNIQUE;
+CREATE CONSTRAINT reason_code  IF NOT EXISTS FOR (r:Reason)      REQUIRE r.code           IS UNIQUE;
+
+
+// --- 2. Nodes ------------------------------------------------------
+
+// Paper  (is_retracted -> boolean; dates -> Neo4j date type, empty -> null)
+// TSV dates are ISO YYYY-MM-DD, which date() parses directly.
+LOAD CSV WITH HEADERS FROM 'file:///nodes_paper.tsv' AS row FIELDTERMINATOR '\t'
+MERGE (p:Paper {doi: row.doi})
+SET p.pmid              = row.pmid,
+    p.openalex_id       = row.openalex_id,
+    p.title             = row.title,
+    p.published_date    = CASE WHEN row.published_date  = '' THEN null ELSE date(row.published_date)  END,
+    p.is_retracted      = toBoolean(row.is_retracted),
+    p.retraction_date   = CASE WHEN row.retraction_date = '' THEN null ELSE date(row.retraction_date) END,
+    p.retraction_nature = row.retraction_nature;
+
+// Journal
+LOAD CSV WITH HEADERS FROM 'file:///nodes_journal.tsv' AS row FIELDTERMINATOR '\t'
+MERGE (j:Journal {name: row.name})
+SET j.publisher = CASE WHEN row.publisher = '' THEN null ELSE row.publisher END;
+
+// Institution
+LOAD CSV WITH HEADERS FROM 'file:///nodes_institution.tsv' AS row FIELDTERMINATOR '\t'
+MERGE (i:Institution {institution_id: row.institution_id})
+SET i.name    = row.name,
+    i.country = CASE WHEN row.country = '' THEN null ELSE row.country END;
+
+// Reason
+LOAD CSV WITH HEADERS FROM 'file:///nodes_reason.tsv' AS row FIELDTERMINATOR '\t'
+MERGE (:Reason {code: row.code});
+
+
+// --- 3. Relationships (paper-level; author edges come from the pipeline) --
+
+// (Paper)-[:PUBLISHED_IN]->(Journal)
+LOAD CSV WITH HEADERS FROM 'file:///rel_published_in.tsv' AS row FIELDTERMINATOR '\t'
+MATCH (p:Paper   {doi: row.doi})
+MATCH (j:Journal {name: row.journal_name})
+MERGE (p)-[:PUBLISHED_IN]->(j);
+
+// (Paper)-[:INVOLVES]->(Institution)  — paper-level institution pool (plan §1)
+LOAD CSV WITH HEADERS FROM 'file:///rel_involves.tsv' AS row FIELDTERMINATOR '\t'
+MATCH (p:Paper       {doi: row.doi})
+MATCH (i:Institution {institution_id: row.institution_id})
+MERGE (p)-[:INVOLVES]->(i);
+
+// (Paper)-[:RETRACTED_FOR]->(Reason)
+LOAD CSV WITH HEADERS FROM 'file:///rel_retracted_for.tsv' AS row FIELDTERMINATOR '\t'
+MATCH (p:Paper  {doi: row.doi})
+MATCH (r:Reason {code: row.reason_code})
+MERGE (p)-[:RETRACTED_FOR]->(r);
+
+
+// ===================================================================
+// 4. Verification
+//    Backbone (this file):  Paper 1554 | Journal 526 | Institution 2209 | Reason 92
+//                           PUBLISHED_IN 1554 | INVOLVES 5208 | RETRACTED_FOR 5358
+//    Author/identity layer (from the Python pipeline, not this file):
+//                           AuthorInstance 10050 | WROTE 10050 | AFFILIATED_WITH 16880
+//                           PROBABLY_SAME_AS 5133 | probable persons 7713 | adjudicated 201
+// ===================================================================
+MATCH (n) RETURN labels(n)[0] AS label, count(*) AS nodes ORDER BY nodes DESC;
+// MATCH ()-[r]->() RETURN type(r) AS rel, count(*) AS edges ORDER BY edges DESC;
+
+
+// ===================================================================
+// 5. Example exploration queries — run individually in Neo4j Browser
+//    (uncomment one at a time). Author queries require the pipeline to have run.
+// ===================================================================
+
+// 5a. Journals with the most retractions (backbone only)
+// MATCH (p:Paper {is_retracted: true})-[:PUBLISHED_IN]->(j:Journal)
+// RETURN j.name AS journal, count(p) AS retractions
+// ORDER BY retractions DESC LIMIT 20;
+
+// 5b. Most common retraction reasons (backbone only)
+// MATCH (:Paper)-[:RETRACTED_FOR]->(r:Reason)
+// RETURN r.code AS reason, count(*) AS n ORDER BY n DESC LIMIT 20;
+
+// 5c. Top probable-persons by retracted-paper count (soft identity resolution)
+// MATCH (a:AuthorInstance)-[:WROTE]->(p:Paper {is_retracted: true})
+// RETURN a.cluster_id AS person, collect(DISTINCT a.name)[0] AS name,
+//        count(*) AS retractions
+// ORDER BY retractions DESC LIMIT 20;
+
+// 5d. One probable-person cluster: instances + their papers + identity edges
+//     (swap 'ashok pandey' for any name_key)
+// MATCH (seed:AuthorInstance {name_key:'ashok pandey'})
+// WITH seed.cluster_id AS cid LIMIT 1
+// MATCH (a:AuthorInstance {cluster_id: cid})
+// OPTIONAL MATCH (a)-[w:WROTE]->(p:Paper)
+// OPTIONAL MATCH (a)-[e:PROBABLY_SAME_AS]->(b:AuthorInstance {cluster_id: cid})
+// RETURN a, w, p, e, b;
+
+// 5e. Same-name instances that are NOT linked (different/low-confidence identity)
+//     e.g. the three "Bing Liu" instances kept apart by conflicting ORCIDs
+// MATCH (a:AuthorInstance {name_key:'bing liu'})
+// OPTIONAL MATCH (a)-[e:PROBABLY_SAME_AS]-(b:AuthorInstance {name_key:'bing liu'})
+// RETURN a, e, b;
+
+// 5f. Adjudicated per-instance facts (formal misconduct finding), with evidence chain
+// MATCH (a:AuthorInstance {on_misconduct_paper: true})-[:WROTE]->(p:Paper)-[:RETRACTED_FOR]->(r:Reason)
+// WHERE r.code IN ['Misconduct - Official Investigation(s) and/or Finding(s)', 'Investigation by ORI']
+// RETURN a.name AS author, a.cluster_id AS person, p.doi AS doi, r.code AS reason
+// ORDER BY person LIMIT 50;
+
+// 5g. Coherence outliers to review (possible same-ORCID mis-assignment),
+//     strongest first (a lone stranger inside a big coherent cluster).
+//     Excludes human-reviewed confirmations (coherence_reviewed=true).
+// MATCH (a:AuthorInstance {coherence_outlier: true})-[:WROTE]->(p:Paper)
+// WHERE a.cluster_size >= 3 AND (a.coherence_reviewed IS NULL OR a.coherence_reviewed = false)
+// RETURN a.name AS name, a.orcid AS orcid, a.cluster_size AS cluster_size,
+//        p.title AS paper, p.is_retracted AS retracted
+// ORDER BY cluster_size DESC;
