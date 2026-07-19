@@ -28,3 +28,8 @@ node_modules/
 
 # Browser automation session output (playwright MCP logs/screenshots)
 .playwright-mcp/
+
+# Generated review page — contains real named-researcher misconduct-adjacent
+# flags; per plan.md §7 the review queue stays PRIVATE/local during the POC.
+# Keep the tracked README (documents the dir); ignore the generated HTML.
+review/*.html

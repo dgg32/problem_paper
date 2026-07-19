@@ -3,15 +3,32 @@
 journal_integrity_check.py — Phase 4 sensor #10 (plan.md).
 
 Flags papers published in journals or publishers with integrity concerns:
-  1. Predatory / compromised publishers (Beall's list snapshot)
+  1. OA-only-publisher journal NOT indexed in DOAJ (see below — replaces the
+     old static predatory-publisher substring guess, 2026-07-19)
   2. Journals delisted from Scopus or Web of Science
   3. Journals with disproportionately high retraction rates (measured from seed data)
 
 Severity:
-  - "high": known predatory publisher or delisted journal
-  - "medium": publisher with elevated retraction rate or known compromises
+  - "high": delisted journal
+  - "medium": not DOAJ-indexed despite an OA-only publisher, or elevated
+    retraction rate
 
-No subscription or API access needed — runs entirely on graph + curated lists.
+Check 1 redesigned 2026-07-19 (graph_processing/refresh_doaj_status.py):
+the old PREDATORY_PUBLISHERS check flagged EVERY journal whose name
+contained a substring like "mdpi" or "frontiers" as high-severity
+"compromised peer review" -- a blunt guess, not a per-journal fact. Measured
+live: 16 of 17 journals it caught are actually properly DOAJ-vetted
+(including "Frontiers of Environmental Science & Engineering", an unrelated
+Higher Education Press/Springer journal that only shares the word
+"Frontiers" with Frontiers Media -- a pure name collision, the exact
+failure mode substring matching invites). Now checks the graph's live
+j.doaj_indexed fact (from DOAJ's public data dump) instead: still only
+meaningful for known OA-only publishers (a legitimately-subscription
+journal is correctly absent from DOAJ and that means nothing), but fires
+on the SPECIFIC journal's real vetting status, not a name guess. Refresh
+the underlying fact with `python graph_processing/refresh_doaj_status.py
+--doaj-csv data/doaj_journals.csv` (re-download the CSV from
+https://doaj.org/csv periodically; DOAJ updates it weekly).
 
 Usage:
   python sensors/journal_integrity_check.py                  # all candidates
@@ -32,27 +49,22 @@ from normalize_authors import resolve_connection  # noqa: E402
 
 REPORT_JSON = REPO_ROOT / "data" / "flags" / "journal_integrity_flags.json"
 
-# Predatory / compromised publishers (Beall's criteria + known paper-mill hosts).
-# Source: Beall's list (archived), plus journals documented in retraction literature.
-PREDATORY_PUBLISHERS = {
-    "mdpi",  # known compromised peer review (very permissive)
-    "frontiers",  # known compromised peer review at scale
-    "scientific reports",  # nature's open-access spillover, high churn
-    "plos one",  # low bar; high mill/spam infiltration
-    "journal of clinical medicine",
-    "biomedicines",
-    "nutrients",
-    "ijms",  # international journal of molecular sciences (MDPI)
-    "ijerph",  # international journal of environmental research and public health
-    "toxins",
-    "viruses",
-    "pathogens",
-    "jcm",  # journal of clinical medicine
-    "cancers",
-    "medicina",
-    "pharma",
-    "appliedsciences",
-    "life",
+# Known OA-only publishers: journals from these publish open-access exclusively,
+# so DOAJ absence is a real (if narrow) signal for them -- unlike a subscription
+# journal, which is correctly absent from DOAJ and means nothing. This set
+# scopes WHICH journals the DOAJ check applies to; it no longer flags anyone by
+# itself (see module docstring -- that was the old, replaced behaviour).
+# Matched against the graph's j.publisher field (canonical, from OpenAlex), NOT
+# journal title substrings -- title matching is exactly what produced the false
+# positive documented above ("Frontiers of Environmental Science &
+# Engineering" is Higher Education Press, not Frontiers Media, but its TITLE
+# contains "Frontiers"). Publisher field is the fix.
+OA_ONLY_PUBLISHERS = {
+    "multidisciplinary digital publishing institute",  # MDPI
+    "frontiers media",
+    "public library of science",  # PLOS
+    "biomed central",
+    "hindawi",
 }
 
 # Journals explicitly delisted from Scopus / Web of Science.
@@ -68,7 +80,8 @@ DELISTED_JOURNALS = {
 QUERY = """
 MATCH (p:Paper {is_retracted:false})-[:PUBLISHED_IN]->(j:Journal)
 WHERE $doi IS NULL OR p.doi = $doi
-RETURN p.doi AS doi, p.title AS title, j.name AS journal_name, p.published_date AS pub_date
+RETURN p.doi AS doi, p.title AS title, j.name AS journal_name, j.publisher AS publisher,
+       j.doaj_indexed AS doaj_indexed, p.published_date AS pub_date
 ORDER BY p.cited_by_count DESC
 LIMIT $limit
 """
@@ -90,13 +103,15 @@ def canonicalize_journal_name(name: str) -> str:
     return name.lower().strip().replace("  ", " ")
 
 
-def check_predatory(journal_name: str) -> tuple[bool, str]:
-    """Check if journal is in predatory/compromised list. Returns (is_predatory, reason)."""
-    canon = canonicalize_journal_name(journal_name)
-    for pred in PREDATORY_PUBLISHERS:
-        if pred in canon:
-            return True, f"Publisher/journal known for compromised peer review: {pred}"
-    return False, ""
+def check_doaj(journal_name: str, publisher: str, doaj_indexed: bool | None) -> tuple[bool, str]:
+    """OA-only publisher whose specific journal isn't DOAJ-indexed. Returns (flagged, reason).
+    See module docstring for why this replaced a title-substring predatory-publisher guess."""
+    if doaj_indexed is None or doaj_indexed:
+        return False, ""  # unknown status, or properly indexed -- no flag either way
+    canon_pub = canonicalize_journal_name(publisher)
+    if not any(p in canon_pub for p in OA_ONLY_PUBLISHERS):
+        return False, ""  # not an OA-only publisher; DOAJ absence means nothing here
+    return True, f"{publisher} journal '{journal_name}' is not indexed in DOAJ despite being an OA-only publisher"
 
 
 def check_delisted(journal_name: str) -> tuple[bool, str]:
@@ -112,6 +127,8 @@ def assess_paper(
     doi: str,
     title: str,
     journal_name: str,
+    publisher: str,
+    doaj_indexed: bool | None,
     high_rate_journals: dict[str, float],
 ) -> dict | None:
     """
@@ -121,13 +138,13 @@ def assess_paper(
     if not journal_name:
         return None
 
-    # Check 1: Predatory publishers
-    is_pred, pred_reason = check_predatory(journal_name)
-    if is_pred:
+    # Check 1: OA-only publisher, specific journal not DOAJ-indexed
+    is_flagged, doaj_reason = check_doaj(journal_name, publisher, doaj_indexed)
+    if is_flagged:
         return {
             "flag": "journal_integrity",
-            "severity": "high",
-            "reason": pred_reason,
+            "severity": "medium",
+            "reason": doaj_reason,
             "paper_doi": doi,
             "paper_title": title,
             "journal_name": journal_name,
@@ -196,6 +213,8 @@ def main() -> None:
             row["doi"],
             row["title"],
             row["journal_name"],
+            row["publisher"],
+            row["doaj_indexed"],
             high_rate_journals
         )
         if flag:

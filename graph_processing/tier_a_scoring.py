@@ -12,6 +12,24 @@ Scoring logic:
   - p_value_hacking_flag_count: weight 0.5 (lowest weight -- plan.md explicitly
     flags this sensor as noisy given the small per-paper p-value sample; see
     sensors/p_value_hacking_detector.py docstring)
+  - pubmed_eoc_flag: weight 2.5 (Expression of Concern -- a formal, dated,
+    journal-issued fact, not a community opinion; found via PubMed's
+    CommentsCorrectionsList, see graph_processing/refresh_editorial_notices.py.
+    NOTE: 166 of 227 EoC papers found 2026-07-19 are one coordinated mass
+    action by a single journal on a single ethics-committee investigation --
+    each is still individually, formally EoC'd (a real per-paper fact), but
+    expect the top of the ranking to cluster on that journal as a result.)
+  - pubmed_erratum_flag: weight 0.3 (weak signal -- most errata are benign
+    corrections, not integrity-relevant; kept low deliberately)
+  - ori_finding_flag: weight 4.0 (HIGHEST weight in the system -- a federal
+    Office of Research Integrity finding naming this exact paper by DOI,
+    via Federal Register "Findings of Research Misconduct" notices; see
+    graph_processing/refresh_ori_findings.py. The single strongest fact-based
+    signal available: not a proxy, not a community opinion, an adjudicated
+    government finding. Measured 2026-07-19: only 2 papers in the whole graph
+    matched, both already-retracted -- the machinery is in place for future
+    re-runs as ORI publishes new findings, but don't expect this to move the
+    current ranking much.)
 
 Score = sum of (flag_count * weight) for each sensor.
 
@@ -57,6 +75,9 @@ WEIGHTS = {
     "journal_integrity_flag_count": 1.0,
     "ai_text_tell_flag_count": 2.0,
     "p_value_hacking_flag_count": 0.5,
+    "pubmed_eoc_flag": 2.5,
+    "pubmed_erratum_flag": 0.3,
+    "ori_finding_flag": 4.0,
     # graph features (Neo4j)
     "coauthor_other_misconduct": 1.5,   # per probable-person co-author with a misconduct paper elsewhere
     "journal_retr_rate": 2.0,           # rate in [0,1]; granular complement to the journal flag
@@ -77,6 +98,13 @@ RETURN p.doi AS doi,
        coalesce(p.journal_integrity_flag_count, 0) AS journal_count,
        coalesce(p.ai_text_tell_flag_count, 0) AS ai_count,
        coalesce(p.p_value_hacking_flag_count, 0) AS pval_count,
+       CASE WHEN p.pubmed_eoc_status = "expression_of_concern" THEN 1 ELSE 0 END AS eoc_flag,
+       CASE WHEN p.pubmed_eoc_status = "erratum_only" THEN 1 ELSE 0 END AS erratum_flag,
+       p.pubmed_eoc_date AS eoc_date,
+       p.pubmed_eoc_source_doi AS eoc_source_doi,
+       CASE WHEN p.ori_finding_doc_url IS NOT NULL THEN 1 ELSE 0 END AS ori_flag,
+       p.ori_finding_doc_url AS ori_doc_url,
+       p.ori_respondent_name AS ori_respondent,
        coalesce(p.coauthor_other_misconduct, 0) AS coauthor_misconduct,
        coalesce(p.journal_retr_rate, 0.0) AS journal_retr_rate,
        p.gds_misconduct_prob AS gds_prob,
@@ -96,6 +124,9 @@ def calculate_score(row: dict) -> float:
         row["journal_count"] * WEIGHTS["journal_integrity_flag_count"] +
         row["ai_count"] * WEIGHTS["ai_text_tell_flag_count"] +
         row["pval_count"] * WEIGHTS["p_value_hacking_flag_count"] +
+        row["eoc_flag"] * WEIGHTS["pubmed_eoc_flag"] +
+        row["erratum_flag"] * WEIGHTS["pubmed_erratum_flag"] +
+        row["ori_flag"] * WEIGHTS["ori_finding_flag"] +
         row["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"] +
         row["journal_retr_rate"] * WEIGHTS["journal_retr_rate"]
     )
@@ -136,6 +167,13 @@ def main() -> None:
             "journal_integrity_count": row["journal_count"],
             "ai_text_tell_count": row["ai_count"],
             "p_value_hacking_count": row["pval_count"],
+            "expression_of_concern": "Y" if row["eoc_flag"] else "",
+            "eoc_date": row["eoc_date"] or "",
+            "eoc_source_doi": row["eoc_source_doi"] or "",
+            "erratum_only": "Y" if row["erratum_flag"] else "",
+            "ori_finding": "Y" if row["ori_flag"] else "",
+            "ori_doc_url": row["ori_doc_url"] or "",
+            "ori_respondent": row["ori_respondent"] or "",
             "coauthor_misconduct": row["coauthor_misconduct"],
             "journal_retr_rate": round(row["journal_retr_rate"], 3),
             # secondary, labeled, NOT in score:
@@ -167,6 +205,13 @@ def main() -> None:
         "journal_integrity_count",
         "ai_text_tell_count",
         "p_value_hacking_count",
+        "expression_of_concern",
+        "eoc_date",
+        "eoc_source_doi",
+        "erratum_only",
+        "ori_finding",
+        "ori_doc_url",
+        "ori_respondent",
         # graph features (in score)
         "coauthor_misconduct",
         "journal_retr_rate",
