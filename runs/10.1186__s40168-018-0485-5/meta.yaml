@@ -1,0 +1,16 @@
+# paperconan run provenance — adjudicated 2026-07-19 (see CONCLUSION.md).
+doi: "10.1186/s40168-018-0485-5"
+title: "Fecal microbiota transplantation"
+tool: paperconan
+tool_version: "0.8.2"
+profile: forensic
+scanned_at: "2026-07-19T09:50:51+00:00"
+file_source: europepmc          # auto-downloaded by run_paperconan.py (PMC5966928)
+n_files_scanned: 3
+findings:
+  high: 26
+  medium: 2
+  low: 0
+top_finding: "within_col_value_duplication · col[2] has value 0.0 repeated 327/604 times"
+adjudicated: false_positive     # raw high count is benign — categorical lookup-table columns
+conclusion: "Near-clean after adjudication: all 26 high + 2 medium findings are on coded categorical columns (e.g. 'Oxygen tolerance') of reference/lookup tables, where repeated values are expected — a false-positive pattern paperconan's own docs flag. Not an integrity concern."

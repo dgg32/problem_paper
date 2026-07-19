@@ -16,28 +16,35 @@ built for programmatic reuse (the /europepmc/webservices/ path IS the API — no
 robots issue like the DOAJ bulk file). Its `core` result carries a per-article
 `hasSuppl` (Y/N) flag, and for `hasSuppl=Y` papers a companion endpoint
   https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/supplementaryFiles
-returns the actual files as a ZIP (verified content-type: application/zip). So a
-Y here gives the forensic sensor a direct download URL, not just a boolean.
+returns the actual files as a ZIP. So a downloadable Y gives the forensic sensor
+a direct download URL, not just a boolean.
 
-Three-state, NOT a boolean (this is the important nuance): `hasSuppl` is a
-reliable POSITIVE but a soft negative. `Y` means PMC has downloadable suppl
-files. `N` can mean "no suppl" OR "suppl exists only behind the publisher's
-paywall, not mirrored in PMC" — and for papers not in PMC at all, Europe PMC
-simply can't see the suppl either way. So we record:
-  pmc_suppl        : PMC has suppl files (fetchable — the useful case)
-  no_pmc_suppl     : article IS in PMC but no suppl files found there
-  unknown          : article not in PMC (or not indexed) — can't tell
+CRITICAL nuance: `hasSuppl=Y` means "supplementary material exists per the
+record", NOT "downloadable as a ZIP". The OA bundle endpoint only serves
+articles in Europe PMC's open-access subset; for others it 404s even with
+hasSuppl=Y (verified: PMC5796892 is hasSuppl=Y + inPMC=Y but its ZIP endpoint
+returns 404). So this sensor HEAD-checks the ZIP endpoint before ever marking a
+paper 'downloadable'. Four states result:
+  pmc_suppl              : ZIP endpoint verified 200 — actually fetchable (the
+                           useful case; the only state that sets has_pmc_suppl)
+  suppl_not_downloadable : hasSuppl=Y but the ZIP endpoint 404s — suppl exists
+                           per the record but Europe PMC can't serve it here
+  no_pmc_suppl           : article IS in PMC but hasSuppl=N (no suppl found)
+  unknown                : article not in PMC (or not indexed) — can't tell
+                           (still a soft negative, not a confirmed "no")
 
 Fields written onto Paper nodes (facts, not verdicts — plan.md §0):
-  pmc_suppl_status   : one of the three states above
-  has_pmc_suppl      : bool convenience (status == "pmc_suppl")
-  pmc_suppl_url      : the supplementaryFiles ZIP endpoint, when fetchable
+  pmc_suppl_status   : one of the four states above
+  has_pmc_suppl      : bool convenience (status == "pmc_suppl" — i.e. verified
+                       downloadable, NOT merely hasSuppl=Y)
+  pmc_suppl_url      : the supplementaryFiles ZIP endpoint, only when downloadable
   suppl_checked_date : provenance
 
 Usage:
   python sensors/suppl_data_check.py                 # all active candidates
   python sensors/suppl_data_check.py --limit 20      # test on a handful
   python sensors/suppl_data_check.py --dry-run       # fetch + report, no writes
+  python sensors/suppl_data_check.py --skip-verify   # trust hasSuppl, skip ZIP HEAD
 """
 from __future__ import annotations
 
@@ -61,13 +68,38 @@ BATCH = 40          # PMIDs per Europe PMC query (keeps the URL well-sized)
 REQ_INTERVAL = 0.2  # self-imposed politeness pace (~5 req/s); no stated hard limit
 
 
-def classify(rec: dict) -> tuple[str, str | None]:
-    """(pmc_suppl_status, pmc_suppl_url) from a Europe PMC core result."""
+def zip_available(session: requests.Session, pmcid: str) -> bool:
+    """Does the OA supplementaryFiles ZIP endpoint actually serve this article?
+
+    Critical: hasSuppl=Y means 'supplementary material exists per the record', NOT
+    'downloadable as a ZIP'. The OA bundle endpoint only serves articles in Europe
+    PMC's open-access subset; for others it 404s even with hasSuppl=Y (verified:
+    PMC5796892 is hasSuppl=Y + inPMC=Y but its ZIP endpoint returns 404). So we
+    HEAD the endpoint before ever calling a paper's suppl 'downloadable'."""
+    try:
+        r = session.head(SUPPL_URL.format(pmcid=pmcid), timeout=15, allow_redirects=True)
+        return r.status_code == 200
+    except requests.RequestException:
+        return False
+
+
+def classify(rec: dict, session: requests.Session | None) -> tuple[str, str | None]:
+    """(pmc_suppl_status, pmc_suppl_url) from a Europe PMC core result.
+
+    Four states:
+      pmc_suppl             — ZIP endpoint verified downloadable (200); url set
+      suppl_not_downloadable — hasSuppl=Y but the OA ZIP endpoint 404s (exists,
+                               not fetchable here)
+      no_pmc_suppl          — in PMC, hasSuppl=N (no suppl found)
+      unknown               — not in PMC (can't tell)
+    Pass session=None to skip the live ZIP check (provisional, trusts hasSuppl)."""
     has_suppl = (rec.get("hasSuppl") or "").upper() == "Y"
     in_pmc = (rec.get("inPMC") or "").upper() == "Y"
     pmcid = rec.get("pmcid")
     if has_suppl and pmcid:
-        return "pmc_suppl", SUPPL_URL.format(pmcid=pmcid)
+        if session is None or zip_available(session, pmcid):
+            return "pmc_suppl", SUPPL_URL.format(pmcid=pmcid)
+        return "suppl_not_downloadable", None
     if in_pmc:
         return "no_pmc_suppl", None
     return "unknown", None
@@ -96,6 +128,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--limit", type=int, default=0, help="only check the first N candidates (0 = all)")
     ap.add_argument("--dry-run", action="store_true", help="fetch and report, but do not write to the graph")
+    ap.add_argument("--skip-verify", action="store_true",
+                    help="trust hasSuppl=Y without HEAD-checking the ZIP endpoint (faster, less accurate)")
     args = ap.parse_args()
 
     conn = resolve_connection()
@@ -112,6 +146,7 @@ def main() -> None:
     session = requests.Session()
     session.headers["User-Agent"] = "problem-paper-poc/1.0 (research-integrity triage)"
 
+    verifier = None if args.skip_verify else session
     results: list[dict] = []
     for i in range(0, len(rows), BATCH):
         chunk = rows[i : i + BATCH]
@@ -121,18 +156,20 @@ def main() -> None:
             if rec is None:
                 status, url = "unknown", None  # not returned by Europe PMC MED
             else:
-                status, url = classify(rec)
+                status, url = classify(rec, verifier)
             results.append({"doi": r["doi"], "pmid": r["pmid"], "status": status, "url": url})
         print(f"  [{min(i + BATCH, len(rows))}/{len(rows)}]", file=sys.stderr)
         time.sleep(REQ_INTERVAL)
 
-    counts = {"pmc_suppl": 0, "no_pmc_suppl": 0, "unknown": 0}
+    counts = {"pmc_suppl": 0, "suppl_not_downloadable": 0, "no_pmc_suppl": 0, "unknown": 0}
     for r in results:
         counts[r["status"]] += 1
+    verified = " (hasSuppl trusted, ZIP not verified)" if args.skip_verify else " (ZIP endpoint verified 200)"
     print("\n=== suppl-data-check ===")
-    print(f"  pmc_suppl    (fetchable files) : {counts['pmc_suppl']}")
-    print(f"  no_pmc_suppl (in PMC, none)    : {counts['no_pmc_suppl']}")
-    print(f"  unknown      (not in PMC)      : {counts['unknown']}")
+    print(f"  pmc_suppl             (downloadable){verified} : {counts['pmc_suppl']}")
+    print(f"  suppl_not_downloadable (hasSuppl=Y, ZIP 404)   : {counts['suppl_not_downloadable']}")
+    print(f"  no_pmc_suppl           (in PMC, none)          : {counts['no_pmc_suppl']}")
+    print(f"  unknown                (not in PMC)            : {counts['unknown']}")
 
     if args.dry_run:
         print("\n  --dry-run: no graph writes")

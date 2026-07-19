@@ -43,6 +43,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
+import yaml
 from neo4j import GraphDatabase
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -51,6 +52,25 @@ from normalize_authors import resolve_connection  # noqa: E402
 
 OUTPUT = REPO_ROOT / "review" / "index.html"
 PUBPEER_CATEGORIES = REPO_ROOT / "data" / "flags" / "pubpeer_comment_categories.json"
+RUNS_DIR = REPO_ROOT / "runs"
+
+# Filter chips: key (matches data-tags) -> label, in display order. A chip is
+# only rendered if at least one card carries that tag (see tag_counts).
+TAG_LABELS = [
+    ("eoc", "Expression of Concern"),
+    ("ori", "ORI Finding"),
+    ("coauthor", "Co-author of misconduct"),
+    ("cites-retracted", "Cites retracted"),
+    ("journal", "Journal integrity"),
+    ("reference", "Reference integrity"),
+    ("ai", "AI-text tells"),
+    ("pval", "p-value pattern"),
+    ("erratum", "Erratum"),
+    ("pubpeer", "PubPeer"),
+    ("suppl", "Suppl data"),
+    ("paperconan", "paperconan"),
+    ("image", "Image screen"),
+]
 
 # 🚩 priority gauge: map the continuous weighted score to 1-5 review-priority
 # flags for at-a-glance triage. Thresholds are fixed + documented (shown in the
@@ -111,6 +131,9 @@ RETURN p.doi AS doi, p.title AS title, j.name AS journal,
        coalesce(p.pubpeer_comments_total, 0) AS pubpeer_total,
        p.pubpeer_check_url AS pubpeer_url,
        coalesce(p.pubpeer_has_author_response, false) AS pubpeer_author_response,
+       coalesce(p.pmc_suppl_status, "unchecked") AS pmc_suppl_status,
+       coalesce(p.has_pmc_suppl, false) AS has_pmc_suppl,
+       p.pmc_suppl_url AS pmc_suppl_url,
        p.retracted_citation_flags AS ret_flags,
        p.reference_integrity_flags AS ref_flags,
        p.journal_integrity_flags AS journal_flags,
@@ -172,7 +195,76 @@ def load_pubpeer_categories() -> dict:
     return out
 
 
-def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict) -> str:
+def load_paperconan_runs() -> dict:
+    """Returns {doi: meta} for each runs/<doi__>/meta.yaml present.
+
+    paperconan is numeric-forensics on the data tables (plan.md Phase 3) — a
+    separate, signal-not-verdict input. Its result is shown as review context,
+    never folded into the weighted score (same discipline as PubPeer / GDS)."""
+    out: dict[str, dict] = {}
+    if not RUNS_DIR.exists():
+        return out
+    for meta_path in RUNS_DIR.glob("*/meta.yaml"):
+        try:
+            meta = yaml.safe_load(meta_path.read_text()) or {}
+        except (yaml.YAMLError, OSError):
+            continue
+        doi = meta.get("doi")
+        if doi:
+            meta["_dir"] = meta_path.parent.name
+            out[doi] = meta
+    return out
+
+
+# Once a run is adjudicated (meta.yaml gains an `adjudicated:` verdict and drops
+# needs_adjudication), the badge reflects the HUMAN verdict, not the raw count —
+# so a benign "26 high" reads calmly, and a real concern reads loud.
+ADJ_BADGE = {
+    "false_positive": ("badge-pc-ok", "paperconan: reviewed — false positive"),
+    "benign":         ("badge-pc-ok", "paperconan: reviewed — benign"),
+    "inconclusive":   ("badge-pc",    "paperconan: reviewed — inconclusive"),
+    "needs_data":     ("badge-pc",    "paperconan: reviewed — needs data"),
+    "confirmed":      ("badge-pc-hi", "paperconan: confirmed concern"),
+}
+
+
+def paperconan_badge(pc: dict) -> str:
+    """Folded-card badge summarising a paperconan run.
+
+    Priority: non-scan outcome > adjudicated verdict > raw severity (draft).
+    A non-scan `outcome` must NOT read as 'clean' (never scanned); once
+    adjudicated, the human verdict supersedes the raw count."""
+    outcome = pc.get("outcome")
+    if outcome == "no_data_files_available":
+        return '<span class="badge badge-pc">paperconan: no data</span>'
+    if outcome == "no_tabular_data":
+        return '<span class="badge badge-pc">paperconan: figures only</span>'
+    if outcome:
+        return '<span class="badge badge-pc">paperconan: not scanned</span>'
+    adj = pc.get("adjudicated")
+    if adj:
+        cls, label = ADJ_BADGE.get(adj, ("badge-pc", f"paperconan: reviewed — {adj}"))
+        return f'<span class="badge {cls}">{esc(label)}</span>'
+    # Unadjudicated: raw severity, marked as a draft so it isn't mistaken for a verdict.
+    f = pc.get("findings") or {}
+    hi, med = f.get("high", 0), f.get("medium", 0)
+    draft = " (draft)" if pc.get("needs_adjudication") else ""
+    if hi:
+        return f'<span class="badge badge-pc-hi">paperconan: {hi} high{draft}</span>'
+    if med:
+        return f'<span class="badge badge-pc">paperconan: {med} medium{draft}</span>'
+    return f'<span class="badge badge-pc">paperconan: clean{draft}</span>'
+
+
+def image_badge(img: dict) -> str:
+    """Folded-card badge for the vendored image-reuse screen (not scored)."""
+    n = img.get("n_findings", 0)
+    if n:
+        return f'<span class="badge badge-pc-hi">🖼 images: {n} reuse</span>'
+    return '<span class="badge badge-pc-ok">🖼 images: no reuse</span>'
+
+
+def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict) -> str:
     """Build the expandable per-paper evidence HTML."""
     parts: list[str] = []
 
@@ -288,6 +380,53 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict) -> str:
             f'<div class="ctx"><span class="ctx-t">GDS prior</span> {r["gds_prob"]:.3f} '
             '<span class="muted">— weak/capped/domain-shifted learned prior, labelled only, never scored.</span></div>'
         )
+    suppl = r["pmc_suppl_status"]
+    if suppl and suppl != "unchecked":
+        if suppl == "pmc_suppl" and r["pmc_suppl_url"]:
+            body = (f'<a href="{esc(r["pmc_suppl_url"])}" target="_blank" rel="noopener">download files (ZIP)</a> '
+                    '<span class="muted">— fetchable from Europe PMC (ZIP verified); the forensic sensors (paperconan) can run on this.</span>')
+        elif suppl == "suppl_not_downloadable":
+            body = ('<span class="muted">exists per the PMC record but is not downloadable from Europe PMC '
+                    '(outside its open-access subset) — would need the publisher\'s page.</span>')
+        elif suppl == "no_pmc_suppl":
+            body = '<span class="muted">none found in PMC for this article.</span>'
+        else:  # unknown
+            body = '<span class="muted">unknown — article not in PMC, so availability can\'t be determined here (not a confirmed "no").</span>'
+        ctx.append(f'<div class="ctx"><span class="ctx-t">📎 Supplementary data</span> {body}</div>')
+
+    pc = pc_runs.get(r["doi"])
+    if pc:
+        f = pc.get("findings") or {}
+        if pc.get("outcome"):
+            # Non-scan outcome (no data / figures-only): show the recorded reason,
+            # never a findings count (there was no numeric scan).
+            detail = f'{esc(pc.get("conclusion") or "not scanned")} '
+        else:
+            counts = f'{f.get("high", 0)} high &middot; {f.get("medium", 0)} medium &middot; {f.get("low", 0)} low'
+            draft = ' <strong>(draft — not yet adjudicated)</strong>' if pc.get("needs_adjudication") else ""
+            top = f'Top signal: {esc(pc["top_finding"])}. ' if pc.get("top_finding") else ""
+            detail = f'{counts}.{draft} {esc(pc.get("conclusion") or "")}. {top}'
+        ctx.append(
+            f'<div class="ctx"><span class="ctx-t">paperconan</span> '
+            f'<span class="muted">(numeric-forensics on the data tables, v{esc(pc.get("tool_version") or "?")})</span><br>'
+            f'<span class="muted">{detail}'
+            'A separate forensic input — signal, not verdict, and NOT part of the score. '
+            f'Full run: <code>runs/{esc(pc.get("_dir") or "")}/</code></span></div>'
+        )
+    img = pc.get("image_screen") if pc else None
+    if img:
+        n = img.get("n_findings", 0)
+        n_img = img.get("n_images", "?")
+        if n:
+            idetail = (f'<strong>{n}</strong> potential whole-image reuse pair(s) flagged across {n_img} figures — '
+                       'inspect the pairs before trusting (aHash can flag legitimately-similar images).')
+        else:
+            idetail = (f'no whole-image reuse detected across {n_img} figures '
+                       '(coarse aHash screen — misses cropped/partial-panel reuse).')
+        ctx.append(
+            f'<div class="ctx"><span class="ctx-t">🖼 Image-reuse screen</span> '
+            f'<span class="muted">{idetail} A screen, not a verdict; NOT part of the score.</span></div>'
+        )
     if ctx:
         parts.append('<div class="ctx-wrap"><div class="ctx-head">Review context (not scored)</div>' + "".join(ctx) + "</div>")
 
@@ -300,37 +439,51 @@ def main() -> None:
     args = ap.parse_args()
 
     pp_cats = load_pubpeer_categories()
+    pc_runs = load_paperconan_runs()
     conn = resolve_connection()
     driver = GraphDatabase.driver(conn["uri"], auth=(conn["user"], conn["password"]))
     with driver.session(database=conn["database"]) as s:
         rows = [dict(r) for r in s.run(QUERY)]
         ranked = sorted(((score(r), r) for r in rows), key=lambda t: t[0], reverse=True)[: args.top]
         cards = []
+        tag_counts: dict[str, int] = {}
         for rank, (sc, r) in enumerate(ranked, 1):
             coauthors = s.run(COAUTHOR_QUERY, doi=r["doi"], reasons=MISCONDUCT_REASONS).data() if r["coauthor_misconduct"] else []
-            badges = []
+            badges, tags = [], []
             if r["ori_flag"]:
-                badges.append('<span class="badge badge-ori">ORI Finding</span>')
+                badges.append('<span class="badge badge-ori">ORI Finding</span>'); tags.append("ori")
             if r["eoc_flag"]:
-                badges.append('<span class="badge badge-eoc">Expression of Concern</span>')
+                badges.append('<span class="badge badge-eoc">Expression of Concern</span>'); tags.append("eoc")
             if r["coauthor_misconduct"] > 0:
-                badges.append(f'<span class="badge badge-flag">Co-author of misconduct work ({r["coauthor_misconduct"]})</span>')
+                badges.append(f'<span class="badge badge-flag">Co-author of misconduct work ({r["coauthor_misconduct"]})</span>'); tags.append("coauthor")
             if r["ret_count"] > 0:
-                badges.append(f'<span class="badge badge-flag">Cites retracted work ({r["ret_count"]})</span>')
+                badges.append(f'<span class="badge badge-flag">Cites retracted work ({r["ret_count"]})</span>'); tags.append("cites-retracted")
             if r["journal_count"] > 0:
-                badges.append('<span class="badge badge-flag">Journal integrity flag</span>')
+                badges.append('<span class="badge badge-flag">Journal integrity flag</span>'); tags.append("journal")
             if r["ref_count"] > 0:
-                badges.append(f'<span class="badge badge-flag">Reference integrity ({r["ref_count"]})</span>')
+                badges.append(f'<span class="badge badge-flag">Reference integrity ({r["ref_count"]})</span>'); tags.append("reference")
             if r["ai_count"] > 0:
-                badges.append(f'<span class="badge badge-flag">AI-text tells ({r["ai_count"]})</span>')
+                badges.append(f'<span class="badge badge-flag">AI-text tells ({r["ai_count"]})</span>'); tags.append("ai")
             if r["pval_count"] > 0:
-                badges.append(f'<span class="badge badge-flag">p-value pattern ({r["pval_count"]})</span>')
+                badges.append(f'<span class="badge badge-flag">p-value pattern ({r["pval_count"]})</span>'); tags.append("pval")
             if r["erratum_flag"]:
-                badges.append('<span class="badge badge-flag">Erratum on record</span>')
+                badges.append('<span class="badge badge-flag">Erratum on record</span>'); tags.append("erratum")
             if r["pubpeer_total"] > 0:
-                badges.append(f'<span class="badge badge-pp">{r["pubpeer_total"]} PubPeer</span>')
+                badges.append(f'<span class="badge badge-pp">{r["pubpeer_total"]} PubPeer</span>'); tags.append("pubpeer")
+            if r["has_pmc_suppl"] and r["pmc_suppl_url"]:
+                badges.append(
+                    f'<a class="badge badge-suppl" href="{esc(r["pmc_suppl_url"])}" target="_blank" '
+                    f'rel="noopener" onclick="event.stopPropagation()" '
+                    f'title="Download supplementary files (ZIP) from Europe PMC">📎 Suppl data</a>'
+                ); tags.append("suppl")
+            if r["doi"] in pc_runs:
+                badges.append(paperconan_badge(pc_runs[r["doi"]])); tags.append("paperconan")
+                if pc_runs[r["doi"]].get("image_screen"):
+                    badges.append(image_badge(pc_runs[r["doi"]]["image_screen"])); tags.append("image")
+            for t in tags:
+                tag_counts[t] = tag_counts.get(t, 0) + 1
             cards.append(f'''
-    <article class="card" data-score="{sc:.2f}" data-rank="{rank}" data-doi="{esc(r['doi'])}">
+    <article class="card" data-score="{sc:.2f}" data-rank="{rank}" data-doi="{esc(r['doi'])}" data-tags="{' '.join(tags)}">
       <div class="card-h" onclick="this.parentElement.classList.toggle('open')">
         <div class="rank">#{rank}</div>
         <div class="score" title="{flag_gauge(sc)} of 5 review-priority flags · weighted Tier-A score {sc:.1f}">
@@ -346,7 +499,7 @@ def main() -> None:
         <div class="chev">▾</div>
       </div>
       <div class="card-b">
-        {render_evidence(r, coauthors, pp_cats)}
+        {render_evidence(r, coauthors, pp_cats, pc_runs)}
         <div class="decision" data-doi="{esc(r['doi'])}">
           <span class="dlabel">Reviewer decision <span class="muted">(saved to this browser only — preview)</span>:</span>
           <button data-v="legit">Legit</button>
@@ -361,9 +514,14 @@ def main() -> None:
     n_pp = sum(1 for _, r in ranked if r["pubpeer_total"] > 0)
     generated = date.today().isoformat()
 
+    chips = "".join(
+        f'<button class="chip" data-tag="{k}" onclick="toggleTag(this)">{esc(label)}'
+        f'<span class="chip-n">{tag_counts[k]}</span></button>'
+        for k, label in TAG_LABELS if tag_counts.get(k)
+    )
     page = PAGE_TEMPLATE.format(
         n=len(ranked), n_eoc=n_eoc, n_pp=n_pp, generated=generated,
-        cards="".join(cards),
+        cards="".join(cards), chips=chips,
     )
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_text(page)
@@ -395,7 +553,10 @@ PAGE_TEMPLATE = """<!doctype html>
   .banner strong {{ color:var(--warn); }}
   .stats {{ display:flex; gap:20px; flex-wrap:wrap; color:var(--muted); font-size:.9rem; margin:10px 0 4px; }}
   .toolbar {{ max-width:960px; margin:0 auto; padding:0 20px; display:flex; gap:10px; align-items:center; }}
-  .toolbar input {{ flex:1; padding:8px 11px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--fg); }}
+  .search {{ flex:1; position:relative; display:flex; align-items:center; }}
+  .search-ico {{ position:absolute; left:13px; font-size:.9rem; opacity:.6; pointer-events:none; }}
+  .toolbar input {{ flex:1; padding:9px 12px 9px 38px; border:1px solid var(--line); border-radius:22px; background:var(--bg); color:var(--fg); }}
+  .toolbar input:focus {{ outline:none; border-color:var(--accent); }}
   main {{ max-width:960px; margin:0 auto; padding:10px 20px 60px; }}
   .card {{ border:1px solid var(--line); border-radius:11px; margin:10px 0; background:var(--card); overflow:hidden; }}
   .card-h {{ display:grid; grid-template-columns:auto auto 1fr auto; gap:14px; align-items:center; padding:13px 16px; cursor:pointer; }}
@@ -412,6 +573,12 @@ PAGE_TEMPLATE = """<!doctype html>
   .badge-eoc {{ background:color-mix(in srgb,var(--eoc) 18%,transparent); color:var(--eoc); }}
   .badge-pp {{ background:color-mix(in srgb,var(--pp) 18%,transparent); color:var(--pp); }}
   .badge-flag {{ background:color-mix(in srgb,var(--fg) 12%,transparent); color:var(--fg); }}
+  .badge-pc {{ background:color-mix(in srgb,#0d9488 20%,transparent); color:#0d9488; }}
+  .badge-pc-hi {{ background:color-mix(in srgb,#dc2626 20%,transparent); color:#dc2626; }}
+  .badge-pc-ok {{ background:color-mix(in srgb,var(--muted) 22%,transparent); color:var(--muted); }}
+  .badge-suppl {{ background:color-mix(in srgb,var(--pp) 16%,transparent); color:var(--pp); text-decoration:none; }}
+  .badge-suppl:hover {{ background:color-mix(in srgb,var(--pp) 28%,transparent); }}
+  .ctx code {{ font-size:.82em; background:color-mix(in srgb,var(--fg) 8%,transparent); padding:1px 5px; border-radius:4px; }}
   .chev {{ color:var(--muted); transition:transform .15s; }}
   .card.open .chev {{ transform:rotate(180deg); }}
   .card-b {{ display:none; padding:4px 16px 16px; border-top:1px solid var(--line); }}
@@ -436,6 +603,14 @@ PAGE_TEMPLATE = """<!doctype html>
   .decision button {{ padding:5px 12px; border:1px solid var(--line); border-radius:7px; background:var(--bg); color:var(--fg); cursor:pointer; font-size:.85rem; }}
   .decision button:hover {{ border-color:var(--accent); }}
   .decision button.sel {{ background:var(--accent); color:#fff; border-color:var(--accent); }}
+  .chips {{ max-width:960px; margin:8px auto 0; padding:0 20px; display:flex; gap:7px; flex-wrap:wrap; align-items:center; }}
+  .chip {{ font-size:.82rem; padding:4px 11px; border:1px solid var(--line); border-radius:20px; background:var(--card); color:var(--fg); cursor:pointer; display:inline-flex; gap:6px; align-items:center; }}
+  .chip:hover {{ border-color:var(--accent); }}
+  .chip.active {{ background:var(--accent); color:#fff; border-color:var(--accent); }}
+  .chip-n {{ font-size:.72rem; opacity:.7; font-variant-numeric:tabular-nums; }}
+  .chip.active .chip-n {{ opacity:.85; }}
+  .filterbar {{ max-width:960px; margin:6px auto 0; padding:0 20px; font-size:.82rem; color:var(--muted); display:flex; gap:12px; align-items:center; }}
+  #clear {{ background:none; border:none; color:var(--pp); cursor:pointer; font-size:.82rem; padding:0; display:none; }}
 </style>
 </head>
 <body>
@@ -456,7 +631,16 @@ PAGE_TEMPLATE = """<!doctype html>
   </div>
 </header>
 <div class="toolbar">
-  <input id="filter" type="search" placeholder="Filter by title, DOI, or journal…" oninput="doFilter(this.value)">
+  <div class="search">
+    <span class="search-ico" aria-hidden="true">🔎</span>
+    <input id="filter" type="search" placeholder="Filter by title, DOI, or journal…" oninput="doFilter(this.value)">
+  </div>
+</div>
+<div class="chips">{chips}</div>
+<div class="filterbar">
+  <span id="shown"></span>
+  <button id="clear" onclick="clearTags()">clear filters ✕</button>
+  <span class="muted">tags combine with AND — a paper must carry every selected tag</span>
 </div>
 <main id="list">
 {cards}
@@ -480,11 +664,37 @@ PAGE_TEMPLATE = """<!doctype html>
     paint();
   }}));
   paint();
-  function doFilter(q) {{
-    q = q.toLowerCase();
-    document.querySelectorAll('.card').forEach(c => {{
-      c.style.display = c.textContent.toLowerCase().includes(q) ? '' : 'none';
+
+  // Combined filtering: free-text query AND the set of active tag chips.
+  let query = '';
+  const activeTags = new Set();
+  const cards = Array.from(document.querySelectorAll('.card'));
+  function applyFilters() {{
+    let shown = 0;
+    cards.forEach(c => {{
+      const textOk = c.textContent.toLowerCase().includes(query);
+      const tags = (c.dataset.tags || '').split(' ');
+      const tagOk = [...activeTags].every(t => tags.includes(t));
+      const vis = textOk && tagOk;
+      c.style.display = vis ? '' : 'none';
+      if (vis) shown++;
     }});
+    const s = document.getElementById('shown');
+    s.textContent = (query || activeTags.size) ? `showing ${{shown}} of ${{cards.length}}` : '';
+  }}
+  function doFilter(v) {{ query = v.toLowerCase(); applyFilters(); }}
+  function toggleTag(btn) {{
+    const t = btn.dataset.tag;
+    if (activeTags.has(t)) {{ activeTags.delete(t); btn.classList.remove('active'); }}
+    else {{ activeTags.add(t); btn.classList.add('active'); }}
+    document.getElementById('clear').style.display = activeTags.size ? '' : 'none';
+    applyFilters();
+  }}
+  function clearTags() {{
+    activeTags.clear();
+    document.querySelectorAll('.chip.active').forEach(b => b.classList.remove('active'));
+    document.getElementById('clear').style.display = 'none';
+    applyFilters();
   }}
 </script>
 </body>

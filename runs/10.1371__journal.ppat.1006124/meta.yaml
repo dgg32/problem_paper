@@ -1,0 +1,14 @@
+doi: "10.1371/journal.ppat.1006124"
+title: ""
+tool: paperconan
+tool_version: "0.8.2"
+checked_date: "2026-07-19"
+file_source: local
+outcome: no_tabular_data
+needs_adjudication: false
+conclusion: "supplementary files were fetched but none are tabular (figures/images only) — paperconan's numeric scan has nothing to run on; NOT a clean result. Re-run with --images for multimodal figure review."
+image_screen:
+  tool: image_similarity_screen
+  risk_level: "GREEN low"
+  n_images: 14
+  n_findings: 0

@@ -1,0 +1,22 @@
+# paperconan run provenance — structured for a future load_paperconan_runs.py
+# replay onto the Paper node (idempotent YAML pattern, cf. data/pdfs/manifest.yaml).
+# Facts only (plan.md §0); the counts below are paperconan's signals, not verdicts.
+doi: "10.3389/fimmu.2018.00063"
+title: "Leishmania donovani ISP2 Mediated Inhibition of Lectin Pathway and Upregulation of C5aR Signaling Promote Parasite Survival inside Host"
+tool: paperconan
+tool_version: "0.8.2"
+profile: forensic
+scanned_at: "2026-07-19T04:07:49+00:00"
+file_source: europepmc          # where the scanned files came from
+cand_id: "europepmc:PMC5796892"
+n_files_scanned: 4
+findings:
+  high: 0
+  medium: 1
+  low: 0
+top_finding: "identical_after_rounding · article_table_2.csv rows 4-8 · 6 cells share rounded value 0.3 across 5 distinct precise values"
+adjudicated: benign     # the single medium flag is an expected rounding collision
+conclusion: "near-clean; the single medium flag is a low-concern rounding collision, not evidence of fabrication"
+# Note: this run dir was renamed fimmu_2018_63 -> 10.3389__fimmu.2018.00063 to
+# match the project DOI convention; data/audit/scan.json still records the tool's
+# original input_dir (runs/fimmu_2018_63/data) verbatim, left unrewritten.

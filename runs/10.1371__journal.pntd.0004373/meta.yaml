@@ -1,0 +1,24 @@
+# paperconan run provenance (DRAFT auto-written by runs/run_paperconan.py).
+# Mechanical fields + severity counts only. The `conclusion` below is a
+# placeholder: paperconan output is signal, not verdict (plan.md §0) — a
+# human/agent must adjudicate and hand-write CONCLUSION.md.
+doi: "10.1371/journal.pntd.0004373"
+title: ""
+tool: paperconan
+tool_version: "0.8.2"
+profile: forensic
+scanned_at: "2026-07-19T12:28:23+00:00"
+file_source: local
+n_files_scanned: 1
+findings:
+  high: 0
+  medium: 0
+  low: 0
+top_finding: ""
+needs_adjudication: true
+conclusion: "TODO — adjudicate the findings and replace this line; paperconan output is signal, not verdict"
+image_screen:
+  tool: image_similarity_screen
+  risk_level: "GREEN low"
+  n_images: 11
+  n_findings: 0
