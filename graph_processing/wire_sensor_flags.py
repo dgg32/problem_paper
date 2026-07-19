@@ -15,12 +15,13 @@ Papers with no flags get explicit zero counts (empty JSON list) so scoring queri
 use simple numeric properties.
 
 pubpeer is handled separately, below the main SENSOR_CONFIG loop, and deliberately
-NOT as count_prop/json_prop: it never produces a real flag count (every candidate
-gets exactly one manual_check_required routing record, never zero), so a
-"pubpeer_flag_count" property would look like a real signal magnitude and invite
-someone to add it to tier_a_scoring.py's WEIGHTS by analogy with the others -- which
-would silently add a constant to every candidate's score. It writes
-pubpeer_check_status/pubpeer_check_url instead, for the review UI only.
+NOT as count_prop/json_prop: PubPeer comment counts measure community attention,
+not misconduct (sound papers attract comments; fraudulent ones can have none), so
+they must never feed tier_a_scoring.py's WEIGHTS. Since the 2026-07-18 sensor
+rework the records carry real per-paper data, so in addition to
+pubpeer_check_status/pubpeer_check_url it also writes the factual triage fields
+pubpeer_comments_total / pubpeer_has_author_response / pubpeer_last_commented --
+for the review UI only, still never as a weighted count.
 
 This is a one-way enrichment step; it is safe to re-run after refreshing sensor reports.
 """
@@ -167,16 +168,22 @@ def main() -> None:
                     """
                     MATCH (p:Paper {doi: $doi})
                     SET p.pubpeer_check_status = $status,
-                        p.pubpeer_check_url = $url
+                        p.pubpeer_check_url = $url,
+                        p.pubpeer_comments_total = $comments_total,
+                        p.pubpeer_has_author_response = $has_author_response,
+                        p.pubpeer_last_commented = $last_commented
                     """,
                     doi=doi,
                     status=rec.get("status", "manual_check_required"),
                     url=rec.get("check_url", ""),
+                    comments_total=rec.get("comments_total") or 0,
+                    has_author_response=(rec.get("author_responses") or 0) > 0,
+                    last_commented=rec.get("last_comment_at"),
                 )
                 pp_written += result.consume().counters.properties_set
         driver.close()
-        print(f"\n  pubpeer: wrote check_status/check_url for {len(pubpeer_records)} papers "
-              f"({pp_written} property updates)")
+        print(f"\n  pubpeer: wrote check_status/check_url/comments_total for "
+              f"{len(pubpeer_records)} papers ({pp_written} property updates)")
 
 
 if __name__ == "__main__":
