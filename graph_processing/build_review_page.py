@@ -64,7 +64,6 @@ TAG_LABELS = [
     ("cites-retracted-ext", "Cites retracted (ext.)"),
     ("self-cite", "Cites own retracted"),
     ("journal", "Journal integrity"),
-    ("reference", "Reference integrity"),
     ("ai", "AI-text tells"),
     ("pval", "p-value pattern"),
     ("erratum", "Erratum"),
@@ -92,7 +91,7 @@ def flag_gauge(sc: float) -> int:
 # Single source of truth — imported, not copied, so the two can never drift
 # (was three hand-synced copies; see #7 in BUG.md). tier_a_scoring only touches
 # the DB inside main(), so importing the module is side-effect-free.
-from tier_a_scoring import WEIGHTS  # noqa: E402
+from tier_a_scoring import WEIGHTS, load_paperconan_runs  # noqa: E402
 
 # Same broad misconduct-signal set as flag_evidence_report.py / gds.
 MISCONDUCT_REASONS = [
@@ -149,6 +148,7 @@ RETURN coauthor_name, example_dois, reasons ORDER BY coauthor_name LIMIT 6
 
 
 def score(r: dict) -> float:
+    adj = r.get("paperconan_adjudication")
     return (
         r["ret_count"] * WEIGHTS["retracted_citation_flag_count"]
         + r["ext_ret_count"] * WEIGHTS["external_retracted_citation_flag_count"]
@@ -161,6 +161,8 @@ def score(r: dict) -> float:
         + r["ori_flag"] * WEIGHTS["ori_finding_flag"]
         + r["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"]
         + r["journal_retr_rate"] * WEIGHTS["journal_retr_rate"]
+        + (WEIGHTS["paperconan_needs_human"] if adj == "needs_human" else 0.0)
+        + (WEIGHTS["paperconan_confirmed"] if adj == "confirmed" else 0.0)
     )
 
 
@@ -191,26 +193,10 @@ def load_pubpeer_categories() -> dict:
     return out
 
 
-def load_paperconan_runs() -> dict:
-    """Returns {doi: meta} for each runs/<doi__>/meta.yaml present.
-
-    paperconan is numeric-forensics on the data tables (plan.md Phase 3) — a
-    separate, signal-not-verdict input. Its result is shown as review context,
-    never folded into the weighted score (same discipline as PubPeer / GDS)."""
-    out: dict[str, dict] = {}
-    if not RUNS_DIR.exists():
-        return out
-    for meta_path in RUNS_DIR.glob("*/meta.yaml"):
-        try:
-            meta = yaml.safe_load(meta_path.read_text()) or {}
-        except (yaml.YAMLError, OSError):
-            continue
-        doi = meta.get("doi")
-        if doi:
-            meta["_dir"] = meta_path.parent.name
-            out[doi] = meta
-    return out
-
+# load_paperconan_runs() now lives in tier_a_scoring.py (imported above) --
+# paperconan's `needs_human`/`confirmed` verdicts are scored since 2026-07-21
+# (see that module's WEIGHTS comment); the raw high/medium/low counts and
+# every other verdict stay unscored, same discipline as PubPeer / GDS.
 
 # Once a run is adjudicated (meta.yaml gains an `adjudicated:` verdict and drops
 # needs_adjudication), the badge reflects the HUMAN verdict, not the raw count —
@@ -220,6 +206,7 @@ ADJ_BADGE = {
     "benign":         ("badge-pc-ok", "paperconan: reviewed — benign"),
     "inconclusive":   ("badge-pc",    "paperconan: reviewed — inconclusive"),
     "needs_data":     ("badge-pc",    "paperconan: reviewed — needs data"),
+    "needs_human":    ("badge-pc-hi", "paperconan: unresolved anomaly — needs human review"),
     "confirmed":      ("badge-pc-hi", "paperconan: confirmed concern"),
 }
 
@@ -386,20 +373,27 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
     if r["erratum_flag"]:
         parts.append(row("Erratum on record", WEIGHTS["pubmed_erratum_flag"], "A published erratum exists (weak signal — most errata are benign corrections)."))
 
+    pc = pc_runs.get(r["doi"])
+    pc_adj = pc.get("adjudicated") if pc else None
+    if pc_adj in ("needs_human", "confirmed"):
+        weight = WEIGHTS["paperconan_confirmed"] if pc_adj == "confirmed" else WEIGHTS["paperconan_needs_human"]
+        label = "paperconan: confirmed concern" if pc_adj == "confirmed" else "paperconan: unresolved anomaly"
+        parts.append(row(
+            label, weight,
+            f'{esc(pc.get("top_finding") or "")}. {esc(pc.get("conclusion") or "")} '
+            f'<span class="muted">Full run: <code>runs/{esc(pc.get("_dir") or "")}/</code></span>',
+        ))
+
     # --- non-scored review context ---
+    # reference_integrity is deliberately NOT shown here (2026-07-21): the sensor
+    # itself is held out of the routine pipeline (see tier_a_scoring.py WEIGHTS
+    # comment -- Route 2's ~71%-of-corpus false-positive rate), so any data in
+    # r["ref_count"]/ref_flags is a stale snapshot from before that decision,
+    # not something a routine re-run keeps current. Surfacing stale, known-noisy
+    # counts on the frontend would be misleading regardless of the "not scored"
+    # label. The QUERY field is left in place (harmless, unused) rather than
+    # touching the Cypher for a pure UI change.
     ctx = []
-    if r["ref_count"] > 0:
-        flags = json.loads(r["ref_flags"] or "[]")
-        items = "".join(f'<li>{esc((f.get("reference_title") or "")[:100])} — <span class="muted">{esc(f.get("reason"))}</span></li>' for f in flags[:4])
-        ctx.append(
-            f'<div class="ctx"><span class="ctx-t">Reference integrity ({r["ref_count"]})</span>'
-            f'<ul>{items}</ul>'
-            '<span class="muted">NOT part of the score (2026-07-20). DOI-based lookups (verified '
-            'against Crossref + the universal doi.org resolver) are precise, but the no-DOI '
-            'bibliographic-search route below mixes in real, poorly-indexed citations (taxonomic '
-            'monographs, pre-DOI authorities, gray literature) at a ~71%-of-corpus false-positive '
-            'rate -- read each item, don\'t trust the count.</span></div>'
-        )
     if r["pubpeer_total"] > 0:
         cats = pp_cats.get(r["doi"], {})
         cat_str = ", ".join(f"{k.replace('_', ' ')}: {v}" for k, v in sorted(cats.items(), key=lambda kv: -kv[1])) or "uncategorised"
@@ -430,7 +424,6 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             body = '<span class="muted">unknown — article not in PMC, so availability can\'t be determined here (not a confirmed "no").</span>'
         ctx.append(f'<div class="ctx"><span class="ctx-t">📎 Supplementary data</span> {body}</div>')
 
-    pc = pc_runs.get(r["doi"])
     if pc:
         f = pc.get("findings") or {}
         if pc.get("outcome"):
@@ -442,11 +435,15 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             draft = ' <strong>(draft — not yet adjudicated)</strong>' if pc.get("needs_adjudication") else ""
             top = f'Top signal: {esc(pc["top_finding"])}. ' if pc.get("top_finding") else ""
             detail = f'{counts}.{draft} {esc(pc.get("conclusion") or "")}. {top}'
+        scored_note = (
+            "The needs_human/confirmed verdict above is scored; the raw detector counts here are not. "
+            if pc_adj in ("needs_human", "confirmed") else
+            "A separate forensic input — signal, not verdict, and NOT part of the score. "
+        )
         ctx.append(
             f'<div class="ctx"><span class="ctx-t">paperconan</span> '
             f'<span class="muted">(numeric-forensics on the data tables, v{esc(pc.get("tool_version") or "?")})</span><br>'
-            f'<span class="muted">{detail}'
-            'A separate forensic input — signal, not verdict, and NOT part of the score. '
+            f'<span class="muted">{detail}{scored_note}'
             f'Full run: <code>runs/{esc(pc.get("_dir") or "")}/</code></span></div>'
         )
     img = pc.get("image_screen") if pc else None
@@ -480,6 +477,9 @@ def main() -> None:
     driver = GraphDatabase.driver(conn["uri"], auth=(conn["user"], conn["password"]))
     with driver.session(database=conn["database"]) as s:
         rows = [dict(r) for r in s.run(QUERY)]
+        for r in rows:
+            pc = pc_runs.get(r["doi"])
+            r["paperconan_adjudication"] = pc.get("adjudicated") if pc else None
         ranked = sorted(((score(r), r) for r in rows), key=lambda t: t[0], reverse=True)[: args.top]
         cards = []
         tag_counts: dict[str, int] = {}
@@ -502,8 +502,6 @@ def main() -> None:
                 badges.append(f'<span class="badge badge-flag" title="Retracted per OpenAlex, outside our Retraction-Watch corpus">Cites retracted (ext.) ({r["ext_ret_count"]})</span>'); tags.append("cites-retracted-ext")
             if r["journal_count"] > 0:
                 badges.append('<span class="badge badge-flag">Journal integrity flag</span>'); tags.append("journal")
-            if r["ref_count"] > 0:
-                badges.append(f'<span class="badge badge-pc">Reference integrity ({r["ref_count"]})</span>'); tags.append("reference")
             if r["ai_count"] > 0:
                 badges.append(f'<span class="badge badge-flag">AI-text tells ({r["ai_count"]})</span>'); tags.append("ai")
             if r["pval_count"] > 0:
@@ -656,6 +654,11 @@ PAGE_TEMPLATE = """<!doctype html>
   .chip.active .chip-n {{ opacity:.85; }}
   .filterbar {{ max-width:960px; margin:6px auto 0; padding:0 20px; font-size:.82rem; color:var(--muted); display:flex; gap:12px; align-items:center; }}
   #clear {{ background:none; border:none; color:var(--pp); cursor:pointer; font-size:.82rem; padding:0; display:none; }}
+  .pager {{ max-width:960px; margin:16px auto; padding:0 20px; display:flex; gap:10px; align-items:center; justify-content:center; font-size:.86rem; color:var(--muted); }}
+  .pager button {{ padding:6px 14px; border:1px solid var(--line); border-radius:7px; background:var(--card); color:var(--fg); cursor:pointer; font-size:.85rem; }}
+  .pager button:disabled {{ opacity:.4; cursor:default; }}
+  .pager button:not(:disabled):hover {{ border-color:var(--accent); }}
+  .pager-info {{ font-variant-numeric:tabular-nums; white-space:nowrap; }}
 </style>
 </head>
 <body>
@@ -687,9 +690,19 @@ PAGE_TEMPLATE = """<!doctype html>
   <button id="clear" onclick="clearTags()">clear filters ✕</button>
   <span class="muted">tags combine with AND — a paper must carry every selected tag</span>
 </div>
+<div class="pager" id="pagerTop">
+  <button id="prevTop" onclick="gotoPage(page-1)">← prev</button>
+  <span class="pager-info" id="pageInfoTop"></span>
+  <button id="nextTop" onclick="gotoPage(page+1)">next →</button>
+</div>
 <main id="list">
 {cards}
 </main>
+<div class="pager" id="pagerBottom">
+  <button id="prevBottom" onclick="gotoPage(page-1)">← prev</button>
+  <span class="pager-info" id="pageInfoBottom"></span>
+  <button id="nextBottom" onclick="gotoPage(page+1)">next →</button>
+</div>
 <script>
   // Reviewer decisions: localStorage only (this browser). Clearly a preview until the backend lands.
   const KEY = 'review-decisions-v1';
@@ -711,22 +724,51 @@ PAGE_TEMPLATE = """<!doctype html>
   paint();
 
   // Combined filtering: free-text query AND the set of active tag chips.
+  // Pagination applies to the FILTERED set, not the raw list -- "page 1 of
+  // filtered results," matching how the toolbar's "shown X of Y" already works.
+  const PAGE_SIZE = 50;
   let query = '';
+  let page = 1;
+  let filtered = [];
   const activeTags = new Set();
   const cards = Array.from(document.querySelectorAll('.card'));
+
   function applyFilters() {{
-    let shown = 0;
-    cards.forEach(c => {{
+    filtered = cards.filter(c => {{
       const textOk = c.textContent.toLowerCase().includes(query);
       const tags = (c.dataset.tags || '').split(' ');
       const tagOk = [...activeTags].every(t => tags.includes(t));
-      const vis = textOk && tagOk;
-      c.style.display = vis ? '' : 'none';
-      if (vis) shown++;
+      return textOk && tagOk;
     }});
-    const s = document.getElementById('shown');
-    s.textContent = (query || activeTags.size) ? `showing ${{shown}} of ${{cards.length}}` : '';
+    page = 1;
+    renderPage();
   }}
+
+  function renderPage() {{
+    const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+    page = Math.min(Math.max(1, page), totalPages);
+    const start = (page - 1) * PAGE_SIZE;
+    const end = start + PAGE_SIZE;
+    const onPage = new Set(filtered.slice(start, end));
+    cards.forEach(c => {{ c.style.display = onPage.has(c) ? '' : 'none'; }});
+
+    const s = document.getElementById('shown');
+    s.textContent = (query || activeTags.size) ? `showing ${{filtered.length}} of ${{cards.length}}` : '';
+
+    const info = filtered.length
+      ? `page ${{page}} of ${{totalPages}} (${{start + 1}}–${{Math.min(end, filtered.length)}} of ${{filtered.length}})`
+      : 'no papers match';
+    ['pageInfoTop', 'pageInfoBottom'].forEach(id => document.getElementById(id).textContent = info);
+    ['prevTop', 'prevBottom'].forEach(id => document.getElementById(id).disabled = page <= 1);
+    ['nextTop', 'nextBottom'].forEach(id => document.getElementById(id).disabled = page >= totalPages);
+  }}
+
+  function gotoPage(n) {{
+    page = n;
+    renderPage();
+    document.getElementById('list').scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+  }}
+
   function doFilter(v) {{ query = v.toLowerCase(); applyFilters(); }}
   function toggleTag(btn) {{
     const t = btn.dataset.tag;
@@ -741,6 +783,8 @@ PAGE_TEMPLATE = """<!doctype html>
     document.getElementById('clear').style.display = 'none';
     applyFilters();
   }}
+
+  applyFilters();
 </script>
 </body>
 </html>"""

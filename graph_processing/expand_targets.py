@@ -41,6 +41,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from normalize_authors import resolve_connection   # noqa: E402
 from build_instances import name_key               # noqa: E402
 from orcid_client import canon_doi                  # noqa: E402
+from _crossref_verify import (                      # noqa: E402
+    title_matches_crossref, reconcile_authors_with_crossref, LookupUnavailable,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO_ROOT / ".env.yaml"
@@ -132,9 +135,20 @@ def main() -> None:
                 continue
 
             added = 0
+            skipped_title_mismatch = 0
             for w in works:
                 doi = canon_doi(w.get("doi") or "")
                 if not doi or doi in existing_dois or doi in seen:
+                    continue
+                try:
+                    title_ok, cr_title = title_matches_crossref(doi, w.get("title") or "")
+                except LookupUnavailable as e:
+                    print(f"    {doi} Crossref verify unreachable, skipping: {e}")
+                    continue
+                if not title_ok:
+                    skipped_title_mismatch += 1
+                    print(f"    SKIP {doi}: OpenAlex/Crossref title mismatch "
+                          f"(openalex={w.get('title')!r} crossref={cr_title!r})")
                     continue
                 seen.add(doi)
                 added += 1
@@ -151,7 +165,14 @@ def main() -> None:
                 if src.get("display_name"):
                     pub_in.append({"doi": doi, "journal": src["display_name"],
                                    "publisher": src.get("host_organization_name") or ""})
-                for j, a in enumerate(parse_authors(w)):
+                try:
+                    reconciled, changes = reconcile_authors_with_crossref(doi, parse_authors(w))
+                except LookupUnavailable as e:
+                    print(f"    {doi} Crossref author-verify unreachable, using OpenAlex authors as-is: {e}")
+                    reconciled, changes = parse_authors(w), []
+                for c in changes:
+                    print(f"    {doi}: {c}")
+                for j, a in enumerate(reconciled):
                     iid = f"{doi}::{j}"
                     instances.append({"iid": iid, "name": a["name"],
                                       "name_key": name_key(a["name"]), "orcid": a["orcid"],
@@ -166,7 +187,8 @@ def main() -> None:
                 for ref in (w.get("referenced_works") or []):
                     if ref in existing_oaids:      # only edges to papers we already have
                         cites.append({"doi": doi, "ref": ref})
-            print(f"  [{i}/{len(targets)}] {t['name']:<24} +{added} new papers")
+            print(f"  [{i}/{len(targets)}] {t['name']:<24} +{added} new papers "
+                  f"({skipped_title_mismatch} title-mismatch skips)")
 
         write(s, papers, instances, wrote, affil, pub_in, cites)
         report(s, len(targets), papers, instances, cites)

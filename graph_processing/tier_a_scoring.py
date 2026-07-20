@@ -61,11 +61,39 @@ import json
 import sys
 from pathlib import Path
 
+import yaml
 from neo4j import GraphDatabase
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "graph_processing"))
 from normalize_authors import resolve_connection  # noqa: E402
+
+RUNS_DIR = REPO_ROOT / "runs"
+
+
+def load_paperconan_runs() -> dict:
+    """Returns {doi: meta} for each runs/<doi__>/meta.yaml present.
+
+    The filesystem (not the graph) is the source of truth for paperconan
+    verdicts -- meta.yaml is what a human/agent hand-edits during
+    adjudication (see runs/*/CONCLUSION.md), so reading it directly here
+    means a corrected verdict takes effect on the next scoring run with no
+    separate "wire it into the graph" step to remember. build_review_page.py
+    imports this same function so both scripts agree exactly on what a
+    paperconan verdict is."""
+    out: dict[str, dict] = {}
+    if not RUNS_DIR.exists():
+        return out
+    for meta_path in RUNS_DIR.glob("*/meta.yaml"):
+        try:
+            meta = yaml.safe_load(meta_path.read_text()) or {}
+        except (yaml.YAMLError, OSError):
+            continue
+        doi = meta.get("doi")
+        if doi:
+            meta["_dir"] = meta_path.parent.name
+            out[doi] = meta
+    return out
 
 # Scoring weights. Two families, both explainable (plan.md §0: every point maps
 # to a flag):
@@ -76,10 +104,26 @@ from normalize_authors import resolve_connection  # noqa: E402
 # domain-shifted learned prior (see gds_node_classification.py) and rides along
 # only as a labeled secondary column for the reviewer.
 #
-# DO NOT add image-forensics, paperconan, PubPeer, GDS, or reference_integrity_flag_count
-# keys here. Those are soft / signal-not-verdict inputs shown as labelled review
-# context only (plan.md §0); scoring them would silently turn a hypothesis into
-# a weighted accusation.
+# paperconan_needs_human / paperconan_confirmed (added 2026-07-21): the ONE
+# exception to "soft inputs stay unscored" below, and only for these two
+# specific ADJUDICATED verdicts (never the raw high/medium/low counts, which
+# stay unscored — see load_paperconan_runs() above). Added after a real,
+# quantified finding (10.1038/s41586-024-08248-5: an 8-decimal exact
+# relationship between 2 of 3 nominal replicate columns that the 3rd doesn't
+# share, plus a ~1.2e-6-by-chance measurement duplication) sat unscored while
+# an earlier, wrong "false_positive" adjudication of the SAME data had also
+# gone unscored — i.e. the score was blind to this signal in both directions,
+# which defeated the point of running paperconan at all. Weighted comparably
+# to the other strongest fact-based signals here (needs_human ~ pubmed_eoc,
+# confirmed ~ ori_finding) because a directly-opened, quantified anomaly in
+# the paper's own source data is that strong a signal once a human/agent has
+# actually adjudicated it — this is NOT the raw detector count (which stays
+# excluded, see below), only the post-adjudication verdict.
+#
+# DO NOT add image-forensics, PubPeer, GDS, raw paperconan severity counts, or
+# reference_integrity_flag_count keys here. Those remain soft / signal-not-
+# verdict inputs shown as labelled review context only (plan.md §0); scoring
+# them would silently turn a hypothesis into a weighted accusation.
 #   reference_integrity_flag_count excluded 2026-07-20: Route 1 (DOI-based
 #   lookup against Crossref, now cross-checked against the universal doi.org
 #   resolver) is precise, but Route 2 (title/author bibliographic search when a
@@ -88,10 +132,11 @@ from normalize_authors import resolve_connection  # noqa: E402
 #   title search (Bergey's Manual taxonomic chapters, pre-DOI species-naming
 #   authorities, LPSN, gray literature). Until Route 2 is fixed or split out,
 #   its counts are noise, not signal -- see sensors/reference_integrity_checker.py.
-# This WEIGHTS dict is the single source of truth — build_review_page.py and
-# flag_evidence_report.py import it (see #7 in BUG.md); keep every weight
-# here, not copied.
-WEIGHTS = {
+# This dict is the fallback/default source of truth — build_review_page.py and
+# flag_evidence_report.py import WEIGHTS (see #7 in BUG.md), which is DEFAULT_WEIGHTS
+# overlaid with config/weights.yaml if present (see load_weights() below). Keep every
+# weight here, not copied.
+DEFAULT_WEIGHTS = {
     # sensor flags
     "retracted_citation_flag_count": 3.0,
     "external_retracted_citation_flag_count": 2.0,
@@ -104,7 +149,39 @@ WEIGHTS = {
     # graph features (Neo4j)
     "coauthor_other_misconduct": 1.5,   # per probable-person co-author with a misconduct paper elsewhere
     "journal_retr_rate": 2.0,           # rate in [0,1]; granular complement to the journal flag
+    # paperconan (filesystem, not the graph — see load_paperconan_runs() above)
+    "paperconan_needs_human": 2.0,      # an opened, quantified anomaly that survived adjudication
+    "paperconan_confirmed": 4.0,        # tied with ori_finding_flag as the strongest signal here
 }
+
+WEIGHTS_CONFIG_PATH = REPO_ROOT / "config" / "weights.yaml"
+
+
+def load_weights(path: Path = WEIGHTS_CONFIG_PATH) -> dict:
+    """DEFAULT_WEIGHTS overlaid with config/weights.yaml, if present.
+
+    Lets a reviewer retune the scoring formula (config/weights.yaml, under
+    git for an audit trail) without touching code. Unknown keys in the YAML
+    are ignored with a warning rather than silently scoring an unweighted
+    flag; missing keys fall back to the coded default so a partial override
+    file still produces a complete, explainable score."""
+    weights = dict(DEFAULT_WEIGHTS)
+    if not path.exists():
+        return weights
+    try:
+        overrides = yaml.safe_load(path.read_text()) or {}
+    except (yaml.YAMLError, OSError) as e:
+        print(f"warning: could not read {path} ({e}); using default weights", file=sys.stderr)
+        return weights
+    for key, value in overrides.items():
+        if key not in weights:
+            print(f"warning: {path} has unknown weight key {key!r}; ignoring", file=sys.stderr)
+            continue
+        weights[key] = float(value)
+    return weights
+
+
+WEIGHTS = load_weights()
 
 # Rank ALL not-yet-retracted candidates. Nearly every one has some graph signal
 # (59% have a misconduct-history co-author), so this is a full triage ordering,
@@ -142,7 +219,8 @@ RETURN p.doi AS doi,
 
 
 def calculate_score(row: dict) -> float:
-    """Weighted explainable score (sensor flags + graph features)."""
+    """Weighted explainable score (sensor flags + graph features + paperconan verdict)."""
+    adj = row.get("paperconan_adjudication")
     return (
         row["ret_count"] * WEIGHTS["retracted_citation_flag_count"] +
         row["ext_ret_count"] * WEIGHTS["external_retracted_citation_flag_count"] +
@@ -154,7 +232,9 @@ def calculate_score(row: dict) -> float:
         row["erratum_flag"] * WEIGHTS["pubmed_erratum_flag"] +
         row["ori_flag"] * WEIGHTS["ori_finding_flag"] +
         row["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"] +
-        row["journal_retr_rate"] * WEIGHTS["journal_retr_rate"]
+        row["journal_retr_rate"] * WEIGHTS["journal_retr_rate"] +
+        (WEIGHTS["paperconan_needs_human"] if adj == "needs_human" else 0.0) +
+        (WEIGHTS["paperconan_confirmed"] if adj == "confirmed" else 0.0)
     )
 
 
@@ -172,9 +252,13 @@ def main() -> None:
         rows = [dict(r) for r in s.run(QUERY)]
     driver.close()
 
+    paperconan_runs = load_paperconan_runs()
+
     # Calculate scores
     results = []
     for row in rows:
+        pc = paperconan_runs.get(row["doi"])
+        row["paperconan_adjudication"] = pc.get("adjudicated") if pc else None
         score = calculate_score(row)
 
         if score < args.min_score:
@@ -203,6 +287,7 @@ def main() -> None:
             "ori_respondent": row["ori_respondent"] or "",
             "coauthor_misconduct": row["coauthor_misconduct"],
             "journal_retr_rate": round(row["journal_retr_rate"], 3),
+            "paperconan_adjudication": row["paperconan_adjudication"] or "",
             # secondary, labeled, NOT in score:
             "gds_misconduct_prob": round(gds_prob, 3) if gds_prob is not None else "",
             "gds_flagged": "Y" if (gds_prob is not None and gds_prob >= 0.5) else "",
@@ -243,6 +328,7 @@ def main() -> None:
         # graph features (in score)
         "coauthor_misconduct",
         "journal_retr_rate",
+        "paperconan_adjudication",
         # secondary learned prior (NOT in score)
         "gds_misconduct_prob",
         "gds_flagged",
@@ -279,7 +365,8 @@ def main() -> None:
     print(f"Score range         : {results[-1]['score']:.1f} — {results[0]['score']:.1f}", file=sys.stderr)
     print(f"Average score       : {sum(r['score'] for r in results) / len(results):.1f}", file=sys.stderr)
     print(f"GDS-flagged in view : {gds_flagged} (secondary learned prior, not in score)", file=sys.stderr)
-    print(f"\nWeights (explainable score):", file=sys.stderr)
+    weights_source = WEIGHTS_CONFIG_PATH if WEIGHTS_CONFIG_PATH.exists() else "built-in defaults"
+    print(f"\nWeights (explainable score, source: {weights_source}):", file=sys.stderr)
     for sensor, weight in WEIGHTS.items():
         print(f"  {sensor}: {weight}", file=sys.stderr)
 

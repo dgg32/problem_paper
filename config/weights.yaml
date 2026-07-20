@@ -1,0 +1,38 @@
+# Tier-A scoring weights (plan.md §2.2).
+#
+# Edit these to change how candidates are ranked -- no code change needed.
+# graph_processing/tier_a_scoring.py loads this file at import time; if it's
+# missing or fails to parse, it falls back to the hardcoded DEFAULT_WEIGHTS
+# in that file (same values as below) so the pipeline never silently breaks.
+#
+# This file is under git, so `git log -p config/weights.yaml` is the audit
+# trail for who changed a weight and when/why -- put the reason in the
+# commit message. build_review_page.py and flag_evidence_report.py both
+# import WEIGHTS from tier_a_scoring.py, so a single edit here covers all
+# three.
+#
+# Do NOT add keys here for image-forensics, PubPeer, GDS, raw paperconan
+# severity counts, or reference_integrity_flag_count -- those are
+# deliberately soft / signal-not-verdict inputs (plan.md §0: every scored
+# point must be an explainable, low-false-positive fact). See the full
+# rationale for each exclusion in tier_a_scoring.py's module docstring
+# before adding a new key.
+
+# sensor flags
+retracted_citation_flag_count: 3.0        # citing known-retracted work (graph-internal), very suspicious
+external_retracted_citation_flag_count: 2.0  # citing a retracted paper outside our RW-seeded corpus (confirmed live via OpenAlex)
+journal_integrity_flag_count: 1.0         # publishing in a compromised/predatory-flagged journal
+ai_text_tell_flag_count: 2.0              # obvious AI-generated text
+p_value_hacking_flag_count: 0.5           # lowest weight -- noisy given small per-paper p-value samples
+pubmed_eoc_flag: 2.5                      # formal, dated, journal-issued Expression of Concern
+pubmed_erratum_flag: 0.3                  # weak signal -- most errata are benign corrections
+ori_finding_flag: 4.0                     # federal ORI misconduct finding naming this exact DOI -- strongest fact-based signal
+
+# graph features (Neo4j)
+coauthor_other_misconduct: 1.5            # per probable-person co-author with a misconduct paper elsewhere
+journal_retr_rate: 2.0                    # journal's retraction rate in [0,1]; granular complement to journal_integrity_flag_count
+
+# paperconan (filesystem-derived, see load_paperconan_runs() in tier_a_scoring.py)
+# Only these two ADJUDICATED verdicts are scored -- never raw high/medium/low counts.
+paperconan_needs_human: 2.0               # opened, quantified anomaly that survived adjudication (~ pubmed_eoc)
+paperconan_confirmed: 4.0                 # confirmed by adjudication (tied with ori_finding_flag)

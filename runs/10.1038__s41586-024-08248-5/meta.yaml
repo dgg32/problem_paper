@@ -1,0 +1,23 @@
+# paperconan run provenance — re-adjudicated 2026-07-21 (see CONCLUSION.md;
+# a first pass 2026-07-20 called this false_positive and was wrong).
+doi: "10.1038/s41586-024-08248-5"
+title: "Human HDAC6 senses valine abundancy to regulate DNA damage"
+tool: paperconan
+tool_version: "0.8.2"
+profile: forensic
+scanned_at: "2026-07-20"
+file_source: local              # Nature's own Source Data links, hand-fetched --
+                                 # PMC has no suppl files for this DOI and paperconan's
+                                 # repository --auto search found no confident match
+n_files_scanned: 14
+findings:
+  high: 64
+  medium: 18
+  low: 400
+top_finding: "identical_column · ExtDataFig10 width(mm) == length(mm) for one dietary group (n=7 of 7; ~1.2e-6 by chance vs. neighboring group's 1/7 baseline)"
+adjudicated: needs_human        # two findings (identical_column on ExtDataFig10;
+                                 # sum_constant+exact_linear on ExtDataFig7 "ED Fig.7o",
+                                 # where 2 of 3 nominal replicates are exact algebraic
+                                 # mirrors and the 3rd isn't) remain unresolved after
+                                 # opening the source tables -- NOT false positives
+conclusion: "NOT clean. Two independent, quantified anomalies survive adjudication: a statistically improbable tumor width=length duplication (7/7 vs. 1/7 baseline in the neighboring group), and an exact (8-decimal) sum-to-constant relationship between 2 of 3 nominal replicate columns that the 3rd replicate doesn't share. Neither is proof of fabrication -- both have conceivable innocent explanations -- but both need human/author context, not dismissal. A first-pass adjudication called this clean; that was wrong (conflated volume-formula consistency with proof of independent measurement, and didn't check whether the 3rd replicate shared the exact-sum relationship). Corrected 2026-07-21."
