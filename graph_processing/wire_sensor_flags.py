@@ -4,9 +4,11 @@ wire_sensor_flags.py — import Phase 4 sensor flags into the graph as Paper pro
 
 Reads JSON reports from data/flags/ and writes, for each matching Paper node:
   - retracted_citation_flag_count      : int
+  - external_retracted_citation_flag_count : int
   - reference_integrity_flag_count     : int
   - tortured_phrase_flag_count         : int
   - retracted_citation_flags         : JSON string (list of flag records)
+  - external_retracted_citation_flags  : JSON string (list of flag records)
   - reference_integrity_flags          : JSON string (list of flag records)
   - tortured_phrase_flags              : JSON string (list of flag records)
 
@@ -46,6 +48,12 @@ SENSOR_CONFIG = {
         "doi_key": "citing_paper_doi",
         "count_prop": "retracted_citation_flag_count",
         "json_prop": "retracted_citation_flags",
+    },
+    "external_retracted_citation": {
+        "file": FLAGS_DIR / "external_retracted_citation_flags.json",
+        "doi_key": "citing_paper_doi",
+        "count_prop": "external_retracted_citation_flag_count",
+        "json_prop": "external_retracted_citation_flags",
     },
     "reference_integrity": {
         "file": FLAGS_DIR / "reference_integrity_flags.json",

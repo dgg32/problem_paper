@@ -61,6 +61,8 @@ TAG_LABELS = [
     ("ori", "ORI Finding"),
     ("coauthor", "Co-author of misconduct"),
     ("cites-retracted", "Cites retracted"),
+    ("cites-retracted-ext", "Cites retracted (ext.)"),
+    ("self-cite", "Cites own retracted"),
     ("journal", "Journal integrity"),
     ("reference", "Reference integrity"),
     ("ai", "AI-text tells"),
@@ -87,19 +89,10 @@ def flag_gauge(sc: float) -> int:
             return flags
     return 0
 
-# Must match tier_a_scoring.py WEIGHTS exactly.
-WEIGHTS = {
-    "retracted_citation_flag_count": 3.0,
-    "reference_integrity_flag_count": 1.5,
-    "journal_integrity_flag_count": 1.0,
-    "ai_text_tell_flag_count": 2.0,
-    "p_value_hacking_flag_count": 0.5,
-    "pubmed_eoc_flag": 2.5,
-    "pubmed_erratum_flag": 0.3,
-    "ori_finding_flag": 4.0,
-    "coauthor_other_misconduct": 1.5,
-    "journal_retr_rate": 2.0,
-}
+# Single source of truth — imported, not copied, so the two can never drift
+# (was three hand-synced copies; see #7 in BUG.md). tier_a_scoring only touches
+# the DB inside main(), so importing the module is side-effect-free.
+from tier_a_scoring import WEIGHTS  # noqa: E402
 
 # Same broad misconduct-signal set as flag_evidence_report.py / gds.
 MISCONDUCT_REASONS = [
@@ -115,6 +108,7 @@ MATCH (p:Paper {is_retracted:false})-[:PUBLISHED_IN]->(j:Journal)
 RETURN p.doi AS doi, p.title AS title, j.name AS journal,
        toString(p.published_date) AS published_date, p.cited_by_count AS cited_by_count,
        coalesce(p.retracted_citation_flag_count, 0) AS ret_count,
+       coalesce(p.external_retracted_citation_flag_count, 0) AS ext_ret_count,
        coalesce(p.reference_integrity_flag_count, 0) AS ref_count,
        coalesce(p.journal_integrity_flag_count, 0) AS journal_count,
        coalesce(p.ai_text_tell_flag_count, 0) AS ai_count,
@@ -135,6 +129,7 @@ RETURN p.doi AS doi, p.title AS title, j.name AS journal,
        coalesce(p.has_pmc_suppl, false) AS has_pmc_suppl,
        p.pmc_suppl_url AS pmc_suppl_url,
        p.retracted_citation_flags AS ret_flags,
+       p.external_retracted_citation_flags AS ext_ret_flags,
        p.reference_integrity_flags AS ref_flags,
        p.journal_integrity_flags AS journal_flags,
        p.ai_text_tell_flags AS ai_flags,
@@ -156,7 +151,8 @@ RETURN coauthor_name, example_dois, reasons ORDER BY coauthor_name LIMIT 6
 def score(r: dict) -> float:
     return (
         r["ret_count"] * WEIGHTS["retracted_citation_flag_count"]
-        + r["ref_count"] * WEIGHTS["reference_integrity_flag_count"]
+        + r["ext_ret_count"] * WEIGHTS["external_retracted_citation_flag_count"]
+        # reference_integrity_flag_count deliberately excluded -- see tier_a_scoring.py WEIGHTS comment
         + r["journal_count"] * WEIGHTS["journal_integrity_flag_count"]
         + r["ai_count"] * WEIGHTS["ai_text_tell_flag_count"]
         + r["pval_count"] * WEIGHTS["p_value_hacking_flag_count"]
@@ -312,16 +308,53 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
 
     if r["ret_count"] > 0:
         flags = json.loads(r["ret_flags"] or "[]")
-        items = "".join(
-            f'<li>📃 <a href="https://doi.org/{esc(f.get("cited_retracted_paper_doi"))}" target="_blank" rel="noopener">'
-            f'{esc((f.get("cited_retracted_paper_title") or "")[:80])}</a> '
-            f'<span class="muted">({esc(", ".join(f.get("retraction_reasons", [])) or "reason unknown")}'
-            + (", cited AFTER retraction" if f.get("citing_after_retraction") else "") + ')</span></li>'
-            for f in flags[:4]
-        )
+
+        def _ret_item(f: dict) -> str:
+            tail = ", cited AFTER retraction" if f.get("citing_after_retraction") else ""
+            self_note = ""
+            if f.get("self_citation"):
+                authors = ", ".join(f.get("self_citation_authors", [])[:3])
+                self_note = (
+                    f' <span class="self-cite">👤 own retracted work'
+                    + (f' — {esc(authors)}' if authors else "") + '</span>'
+                )
+            return (
+                f'<li>📃 <a href="https://doi.org/{esc(f.get("cited_retracted_paper_doi"))}" target="_blank" rel="noopener">'
+                f'{esc((f.get("cited_retracted_paper_title") or "")[:80])}</a> '
+                f'<span class="muted">({esc(", ".join(f.get("retraction_reasons", [])) or "reason unknown")}{tail})</span>'
+                f'{self_note}</li>'
+            )
+
+        # self-citations first — they're the stronger signal
+        flags = sorted(flags, key=lambda f: not f.get("self_citation"))
+        items = "".join(_ret_item(f) for f in flags[:4])
+        n_self = sum(1 for f in flags if f.get("self_citation"))
+        caveat = ""
+        if n_self:
+            caveat = (
+                f'<p class="caveat self-cite-caveat">👤 <strong>{n_self} self-citation(s):</strong> '
+                'the citing paper shares an author (same probable-person cluster) with the retracted '
+                'work it cites — the authors are citing their own now-retracted results, a materially '
+                'stronger integrity signal than citing a stranger\'s.</p>'
+            )
         parts.append(row(
             f'Cites retracted work ({r["ret_count"]})',
             r["ret_count"] * WEIGHTS["retracted_citation_flag_count"],
+            f'{caveat}<ul>{items}</ul>',
+        ))
+
+    if r["ext_ret_count"] > 0:
+        ext_flags = json.loads(r["ext_ret_flags"] or "[]")
+        items = "".join(
+            f'<li>📃 <a href="https://doi.org/{esc(f.get("cited_retracted_paper_doi"))}" target="_blank" rel="noopener">'
+            f'{esc((f.get("cited_retracted_paper_title") or "")[:80])}</a></li>'
+            for f in ext_flags[:4]
+        )
+        parts.append(row(
+            f'Cites retracted work — external ({r["ext_ret_count"]})',
+            r["ext_ret_count"] * WEIGHTS["external_retracted_citation_flag_count"],
+            '<p class="caveat">Retracted per OpenAlex, but outside our own Retraction-Watch-seeded '
+            'corpus — no reason/date/self-citation context available, confirmed retraction status only.</p>'
             f'<ul>{items}</ul>',
         ))
 
@@ -340,15 +373,6 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             esc(flags[0].get("reason") if flags else "flagged"),
         ))
 
-    if r["ref_count"] > 0:
-        flags = json.loads(r["ref_flags"] or "[]")
-        items = "".join(f'<li>{esc((f.get("reference_title") or "")[:100])} — <span class="muted">{esc(f.get("reason"))}</span></li>' for f in flags[:4])
-        parts.append(row(
-            f'Reference integrity ({r["ref_count"]})',
-            r["ref_count"] * WEIGHTS["reference_integrity_flag_count"],
-            f'<ul>{items}</ul>',
-        ))
-
     if r["ai_count"] > 0:
         flags = json.loads(r["ai_flags"] or "[]")
         pats = ", ".join(esc(f.get("pattern")) for f in flags[:4])
@@ -364,6 +388,18 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
 
     # --- non-scored review context ---
     ctx = []
+    if r["ref_count"] > 0:
+        flags = json.loads(r["ref_flags"] or "[]")
+        items = "".join(f'<li>{esc((f.get("reference_title") or "")[:100])} — <span class="muted">{esc(f.get("reason"))}</span></li>' for f in flags[:4])
+        ctx.append(
+            f'<div class="ctx"><span class="ctx-t">Reference integrity ({r["ref_count"]})</span>'
+            f'<ul>{items}</ul>'
+            '<span class="muted">NOT part of the score (2026-07-20). DOI-based lookups (verified '
+            'against Crossref + the universal doi.org resolver) are precise, but the no-DOI '
+            'bibliographic-search route below mixes in real, poorly-indexed citations (taxonomic '
+            'monographs, pre-DOI authorities, gray literature) at a ~71%-of-corpus false-positive '
+            'rate -- read each item, don\'t trust the count.</span></div>'
+        )
     if r["pubpeer_total"] > 0:
         cats = pp_cats.get(r["doi"], {})
         cat_str = ", ".join(f"{k.replace('_', ' ')}: {v}" for k, v in sorted(cats.items(), key=lambda kv: -kv[1])) or "uncategorised"
@@ -457,11 +493,17 @@ def main() -> None:
             if r["coauthor_misconduct"] > 0:
                 badges.append(f'<span class="badge badge-flag">Co-author of misconduct work ({r["coauthor_misconduct"]})</span>'); tags.append("coauthor")
             if r["ret_count"] > 0:
+                ret_flags = json.loads(r["ret_flags"] or "[]")
+                n_self = sum(1 for f in ret_flags if f.get("self_citation"))
                 badges.append(f'<span class="badge badge-flag">Cites retracted work ({r["ret_count"]})</span>'); tags.append("cites-retracted")
+                if n_self:
+                    badges.append(f'<span class="badge badge-selfcite" title="Cites the authors\' OWN retracted work">👤 Cites own retracted ({n_self})</span>'); tags.append("self-cite")
+            if r["ext_ret_count"] > 0:
+                badges.append(f'<span class="badge badge-flag" title="Retracted per OpenAlex, outside our Retraction-Watch corpus">Cites retracted (ext.) ({r["ext_ret_count"]})</span>'); tags.append("cites-retracted-ext")
             if r["journal_count"] > 0:
                 badges.append('<span class="badge badge-flag">Journal integrity flag</span>'); tags.append("journal")
             if r["ref_count"] > 0:
-                badges.append(f'<span class="badge badge-flag">Reference integrity ({r["ref_count"]})</span>'); tags.append("reference")
+                badges.append(f'<span class="badge badge-pc">Reference integrity ({r["ref_count"]})</span>'); tags.append("reference")
             if r["ai_count"] > 0:
                 badges.append(f'<span class="badge badge-flag">AI-text tells ({r["ai_count"]})</span>'); tags.append("ai")
             if r["pval_count"] > 0:
@@ -573,6 +615,7 @@ PAGE_TEMPLATE = """<!doctype html>
   .badge-eoc {{ background:color-mix(in srgb,var(--eoc) 18%,transparent); color:var(--eoc); }}
   .badge-pp {{ background:color-mix(in srgb,var(--pp) 18%,transparent); color:var(--pp); }}
   .badge-flag {{ background:color-mix(in srgb,var(--fg) 12%,transparent); color:var(--fg); }}
+  .badge-selfcite {{ background:color-mix(in srgb,#dc2626 22%,transparent); color:#dc2626; }}
   .badge-pc {{ background:color-mix(in srgb,#0d9488 20%,transparent); color:#0d9488; }}
   .badge-pc-hi {{ background:color-mix(in srgb,#dc2626 20%,transparent); color:#dc2626; }}
   .badge-pc-ok {{ background:color-mix(in srgb,var(--muted) 22%,transparent); color:var(--muted); }}
@@ -593,6 +636,8 @@ PAGE_TEMPLATE = """<!doctype html>
   .ev-b a {{ color:var(--pp); }}
   .muted {{ color:var(--muted); }}
   .caveat {{ background:var(--warnbg); color:var(--warn); border-radius:7px; padding:7px 10px; font-size:.85rem; margin:4px 0 7px; }}
+  .self-cite-caveat {{ background:color-mix(in srgb,#dc2626 12%,transparent); color:#dc2626; }}
+  .self-cite {{ color:#dc2626; font-weight:600; }}
   .ctx-wrap {{ margin-top:16px; border-top:1px dashed var(--line); padding-top:10px; }}
   .ctx-head {{ font-size:.78rem; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin-bottom:6px; }}
   .ctx {{ font-size:.87rem; margin:6px 0; }}

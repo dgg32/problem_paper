@@ -36,6 +36,7 @@ from neo4j import GraphDatabase
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "graph_processing"))
 from normalize_authors import resolve_connection  # noqa: E402
+from tier_a_scoring import WEIGHTS  # noqa: E402 -- single source of truth, see BUG.md #7
 
 # Must match gds_node_classification.py's MISCONDUCT_REASONS (broad,
 # "misconduct-signal" set) -- NOT AuthorInstance.on_misconduct_paper's
@@ -53,15 +54,6 @@ MISCONDUCT_REASONS = [
     "Misconduct by Author",
 ]
 
-WEIGHTS = {
-    "retracted_citation_flag_count": 3.0,
-    "reference_integrity_flag_count": 1.5,
-    "journal_integrity_flag_count": 1.0,
-    "ai_text_tell_flag_count": 2.0,
-    "coauthor_other_misconduct": 1.5,
-    "journal_retr_rate": 2.0,
-}
-
 QUERY = """
 MATCH (p:Paper {is_retracted:false})-[:PUBLISHED_IN]->(j:Journal)
 RETURN p.doi AS doi,
@@ -69,6 +61,7 @@ RETURN p.doi AS doi,
        j.name AS journal,
        p.published_date AS published_date,
        coalesce(p.retracted_citation_flag_count, 0) AS ret_count,
+       coalesce(p.external_retracted_citation_flag_count, 0) AS ext_ret_count,
        coalesce(p.reference_integrity_flag_count, 0) AS ref_count,
        coalesce(p.journal_integrity_flag_count, 0) AS journal_count,
        coalesce(p.ai_text_tell_flag_count, 0) AS ai_count,
@@ -76,6 +69,7 @@ RETURN p.doi AS doi,
        coalesce(p.journal_retr_rate, 0.0) AS journal_retr_rate,
        p.gds_misconduct_prob AS gds_prob,
        p.retracted_citation_flags AS ret_flags,
+       p.external_retracted_citation_flags AS ext_ret_flags,
        p.reference_integrity_flags AS ref_flags,
        p.journal_integrity_flags AS journal_flags,
        p.ai_text_tell_flags AS ai_flags
@@ -99,7 +93,8 @@ LIMIT 6
 def calculate_score(row: dict) -> float:
     return (
         row["ret_count"] * WEIGHTS["retracted_citation_flag_count"] +
-        row["ref_count"] * WEIGHTS["reference_integrity_flag_count"] +
+        row["ext_ret_count"] * WEIGHTS["external_retracted_citation_flag_count"] +
+        # reference_integrity_flag_count deliberately excluded -- see tier_a_scoring.py WEIGHTS comment
         row["journal_count"] * WEIGHTS["journal_integrity_flag_count"] +
         row["ai_count"] * WEIGHTS["ai_text_tell_flag_count"] +
         row["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"] +
@@ -145,13 +140,37 @@ def main() -> None:
                     ],
                 })
 
+            if row["ext_ret_count"] > 0:
+                ext_ret_flags = json.loads(row["ext_ret_flags"] or "[]")
+                flags_summary.append({
+                    "type": "external_retracted_citation",
+                    "count": row["ext_ret_count"],
+                    "weight": WEIGHTS["external_retracted_citation_flag_count"],
+                    "contribution": row["ext_ret_count"] * WEIGHTS["external_retracted_citation_flag_count"],
+                    "note": ("Cites a retracted paper OUTSIDE our Retraction-Watch-seeded corpus, "
+                             "confirmed live via OpenAlex's is_retracted field. No RetractionWatch "
+                             "reason/date/self-citation context available -- see "
+                             "sensors/external_retracted_citation_checker.py."),
+                    "examples": [
+                        {
+                            "cited_doi": f.get("cited_retracted_paper_doi"),
+                            "cited_title": (f.get("cited_retracted_paper_title") or "")[:80],
+                        }
+                        for f in ext_ret_flags[:3]
+                    ],
+                })
+
             if row["ref_count"] > 0:
                 ref_flags = json.loads(row["ref_flags"] or "[]")
                 flags_summary.append({
                     "type": "reference_integrity",
                     "count": row["ref_count"],
-                    "weight": WEIGHTS["reference_integrity_flag_count"],
-                    "contribution": row["ref_count"] * WEIGHTS["reference_integrity_flag_count"],
+                    "scored": False,
+                    "note": ("NOT part of the score (2026-07-20): the no-DOI bibliographic-search "
+                             "route flags ~71% of the corpus, overwhelmingly real citations that "
+                             "just don't index well for title search (taxonomic monographs, "
+                             "pre-DOI authorities, gray literature) -- see "
+                             "sensors/reference_integrity_checker.py."),
                     "examples": [
                         {
                             "reference": (f.get("reference_title") or "")[:100],

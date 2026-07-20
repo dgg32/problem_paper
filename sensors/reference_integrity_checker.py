@@ -2,6 +2,22 @@
 """
 reference_integrity_checker.py — Phase 4 sensor #3 (plan.md).
 
+*** HELD OUT OF THE ROUTINE SENSOR ROLLOUT (2026-07-20) -- see plan.md M4. ***
+Code and Route 1 (DOI-based) logic are both intact and correct -- Route 1 is
+precise, cross-checked against the universal doi.org resolver (fixed
+2026-07-20) to catch DataCite/Zenodo-registered DOIs Crossref alone 404s on.
+But Route 2 (no-DOI bibliographic search) flagged ~71% of the corpus HIGH,
+overwhelmingly real citations that just don't index well for title search
+(Bergey's Manual taxonomic chapters, pre-DOI species-naming authorities,
+LPSN, gray literature) -- so its output is NOT wired into tier_a_scoring.py's
+WEIGHTS (see that file's comment). On top of being unscored, a full run
+takes ~2 hours even with 3x concurrency (Route 2's Crossref+PubMed fallback
+fires per no-DOI reference, and most references in this corpus lack a DOI).
+Not worth that cost for a signal that isn't scored -- kept out of routine
+runs until Route 2 is fixed or split out. Still runnable manually; see Usage
+below. Do not delete -- Route 1 alone may be worth reviving as a scored,
+DOI-only signal later.
+
 Flags a paper that contains references to nonexistent or severely mismatched
 publications. High-precision signal: paper mills and AI-generated content often
 fabricate or garble citations (either wholesale invention or swapped/corrupted
@@ -31,6 +47,7 @@ import json
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
@@ -47,6 +64,14 @@ cfg = yaml.safe_load(CONFIG_PATH.read_text())
 CROSSREF = cfg.get("crossref", {})
 PUBMED = cfg.get("pubmed", {})
 
+# Crossref's polite pool documents a concurrency limit of 3 simultaneous
+# connections (https://www.crossref.org/documentation/retrieve-metadata/rest-api/access-and-authentication/).
+# Per-reference lookups dominate runtime (a single paper can carry hundreds of
+# references), so this is where parallelism actually pays off; stay at the
+# documented cap rather than the requests_per_second value, which only paces
+# the outer per-paper loop.
+REF_CONCURRENCY = 3
+
 
 def canon_doi(doi: str) -> str:
     """Normalize a DOI for comparison."""
@@ -59,70 +84,104 @@ def canon_doi(doi: str) -> str:
     return d
 
 
+def _first_or_str(title) -> str:
+    """Crossref 'title' is a list; some records give a bare string or None."""
+    if isinstance(title, list):
+        return title[0] if title else ""
+    return title or ""
+
+
+class LookupUnavailable(Exception):
+    """A source (Crossref/PubMed) could not be reached — distinct from 'not found'.
+
+    Critical for §0: a transport failure must NEVER be recorded as a fabricated /
+    unresolvable reference (a HIGH-severity, accusatory flag). Callers treat this
+    as 'could not assess' and emit no flag."""
+
+
 def crossref_work_by_doi(doi: str) -> dict | None:
-    """Fetch a Crossref work record by DOI. Returns None if not found."""
+    """Fetch a Crossref work record by DOI. Returns None ONLY for a genuine 404;
+    raises LookupUnavailable on any transport/parse error (never 'not found')."""
+    canon = canon_doi(doi)
+    if not canon:
+        return None
     try:
-        canon = canon_doi(doi)
-        if not canon:
-            return None
         url = f"{CROSSREF['base_url']}/works/{canon}"
         r = requests.get(url, params={"mailto": CROSSREF["mailto"]}, timeout=10)
         if r.status_code == 404:
             return None
         r.raise_for_status()
         return r.json().get("message", {})
-    except Exception:
-        return None
+    except (requests.RequestException, ValueError) as e:
+        raise LookupUnavailable(f"Crossref DOI lookup failed: {e}") from e
+
+
+def doi_resolves(doi: str) -> bool:
+    """Check whether a DOI is registered at all via the universal doi.org
+    resolver, which covers every registration agency (Crossref, DataCite,
+    mEDRA, ...) — not just Crossref. Crossref's own API 404s on any DOI it
+    doesn't register, e.g. Zenodo/DataCite software & dataset DOIs, which are
+    routine citations in bioinformatics papers and are NOT evidence of
+    fabrication. A single hop with redirects disabled is enough: doi.org
+    answers from its own registry, so this doesn't depend on the target
+    site supporting HEAD. Raises LookupUnavailable on transport error."""
+    try:
+        r = requests.head(f"https://doi.org/{doi}", timeout=10, allow_redirects=False)
+        return r.status_code in (200, 301, 302, 303, 307, 308)
+    except requests.RequestException as e:
+        raise LookupUnavailable(f"doi.org lookup failed: {e}") from e
 
 
 def crossref_search(title: str, author: str | None = None, year: int | None = None) -> dict | None:
-    """Bibliographic search via Crossref. Returns best match or None."""
+    """Bibliographic search via Crossref. Returns best match, or None for a
+    genuine empty result; raises LookupUnavailable on transport/parse error."""
+    query = title
+    if author:
+        query += f" {author}"
+    params = {
+        "query.bibliographic": query,
+        "rows": 3,
+        "mailto": CROSSREF["mailto"],
+    }
     try:
-        query = title
-        if author:
-            query += f" {author}"
-        params = {
-            "query.bibliographic": query,
-            "rows": 3,
-            "mailto": CROSSREF["mailto"],
-        }
         url = f"{CROSSREF['base_url']}/works"
         r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
         items = r.json().get("message", {}).get("items", [])
-        if not items:
-            return None
-        best = items[0]
-        best["score"] = best.get("score", 0)
-        return best
-    except Exception:
+    except (requests.RequestException, ValueError) as e:
+        raise LookupUnavailable(f"Crossref search failed: {e}") from e
+    if not items:
         return None
+    best = items[0]
+    best["score"] = best.get("score", 0)
+    return best
 
 
 def pubmed_search(title: str, author: str | None = None) -> str | None:
-    """Search PubMed by title + author. Returns PMID of best match or None."""
+    """Search PubMed by title + author. Returns PMID of best match, or None for a
+    genuine empty result; raises LookupUnavailable on transport/parse error."""
+    query_parts = [f'"{title}"[Title]']
+    if author:
+        query_parts.append(f'"{author}"[Author]')
+    query = " AND ".join(query_parts)
+    params = {
+        "db": "pubmed",
+        "term": query,
+        "retmax": 1,
+        "retmode": "json",
+        "tool": PUBMED.get("tool_name", "fraud-paper-scanner"),
+        "email": PUBMED.get("email", ""),
+    }
+    if PUBMED.get("api_key"):
+        params["api_key"] = PUBMED["api_key"]
     try:
-        query_parts = [f'"{title}"[Title]']
-        if author:
-            query_parts.append(f'"{author}"[Author]')
-        query = " AND ".join(query_parts)
-        params = {
-            "db": "pubmed",
-            "term": query,
-            "retmax": 1,
-            "retmode": "json",
-            "tool": PUBMED.get("tool_name", "fraud-paper-scanner"),
-            "email": PUBMED.get("email", ""),
-        }
-        if PUBMED.get("api_key"):
-            params["api_key"] = PUBMED["api_key"]
         url = f"{PUBMED['base_url']}/esearch.fcgi"
         r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
         ids = r.json().get("esearchresult", {}).get("idlist", [])
-        return ids[0] if ids else None
-    except Exception:
-        return None
+    except (requests.RequestException, ValueError) as e:
+        raise LookupUnavailable(f"PubMed search failed: {e}") from e
+    return ids[0] if ids else None
 
 
 def assess_reference(ref: dict, paper_doi: str) -> dict | None:
@@ -141,12 +200,21 @@ def assess_reference(ref: dict, paper_doi: str) -> dict | None:
     if not ref_title:
         return None  # can't assess without a title
 
+    try:
+        return _assess_reference_online(ref_doi, ref_title, ref_author, ref_year)
+    except LookupUnavailable:
+        # A source was unreachable — cannot assess. Emit NO flag rather than a
+        # false "fabricated reference" accusation (§0).
+        return None
+
+
+def _assess_reference_online(ref_doi, ref_title, ref_author, ref_year) -> dict | None:
     # Route 1: DOI-based lookup
     if ref_doi:
         work = crossref_work_by_doi(ref_doi)
         if work:
             # Found by DOI. Check title/author match.
-            work_title = (work.get("title") or [""])[0] if isinstance(work.get("title"), list) else work.get("title") or ""
+            work_title = _first_or_str(work.get("title"))
             title_match = _title_similarity(ref_title, work_title)
             if title_match > 0.8:
                 return None  # OK
@@ -161,10 +229,14 @@ def assess_reference(ref: dict, paper_doi: str) -> dict | None:
                     "similarity": title_match,
                 }
         else:
-            # DOI doesn't resolve
+            # Not Crossref-registered. Could still be a legitimate DOI from a
+            # different registration agency (e.g. Zenodo/DataCite) — check the
+            # universal resolver before calling it fabricated.
+            if doi_resolves(ref_doi):
+                return None  # valid DOI, just not a Crossref registrant
             return {
                 "severity": "high",
-                "reason": f"DOI {ref_doi} not resolvable via Crossref",
+                "reason": f"DOI {ref_doi} not resolvable via Crossref or doi.org",
                 "reference_doi": ref_doi,
                 "reference_title": ref_title,
             }
@@ -213,13 +285,14 @@ def check_paper(doi: str) -> list[dict]:
         return []
 
     references = work.get("reference", [])
+    citing_title = _first_or_str(work.get("title"))
     flags = []
-    for ref in references:
-        flag = assess_reference(ref, doi)
-        if flag:
-            flag["citing_paper_doi"] = doi
-            flag["citing_paper_title"] = work.get("title") or [""][0] if isinstance(work.get("title"), list) else work.get("title", "")
-            flags.append(flag)
+    with ThreadPoolExecutor(max_workers=REF_CONCURRENCY) as pool:
+        for flag in pool.map(lambda ref: assess_reference(ref, doi), references):
+            if flag:
+                flag["citing_paper_doi"] = doi
+                flag["citing_paper_title"] = citing_title
+                flags.append(flag)
     return flags
 
 
@@ -243,7 +316,7 @@ def main() -> None:
     driver = GraphDatabase.driver(conn["uri"], auth=(conn["user"], conn["password"]))
     with driver.session(database=conn["database"]) as s:
         rows = [dict(r) for r in s.run(
-            "MATCH (p:Paper {is_retracted:false, source:'expansion'}) RETURN p.doi AS doi "
+            "MATCH (p:Paper {is_retracted:false}) RETURN p.doi AS doi "
             "ORDER BY p.cited_by_count DESC LIMIT $lim",
             lim=args.sample or 100
         )]

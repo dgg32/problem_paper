@@ -45,6 +45,7 @@ import argparse
 import re
 import sys
 import json
+from collections import Counter
 from pathlib import Path
 
 from neo4j import GraphDatabase
@@ -174,7 +175,6 @@ def assess_paper(doi: str, title: str, text: str, text_source: str) -> dict | No
         return flags_out
 
     # Repeated identical exact p-values across distinct mentions: weak copy/fabrication lead.
-    from collections import Counter
     value_counts = Counter(round(e["value"], 4) for e in exact)
     repeats = {v: c for v, c in value_counts.items() if c >= 3}
     if repeats:

@@ -104,7 +104,7 @@ def find_matches(text: str, phrases: list[str]) -> list[tuple[str, str]]:
 
 def build_flag(doi: str, title: str, phrase: str, snippet: str) -> dict:
     obvious = phrase.lower() in OBVIOUS_PHRASES
-    severity = "high" if obvious else "high"  # curated list -> high by default
+    severity = "high" if obvious else "medium"  # OBVIOUS_PHRASES are the high-confidence subset
     return {
         "flag": "tortured_phrase",
         "severity": severity,

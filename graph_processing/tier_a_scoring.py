@@ -5,8 +5,15 @@ tier_a_scoring.py — Tier-A heuristic scoring engine (plan.md §2.2).
 Combines Phase 4 sensor outputs into a weighted triage score.
 
 Scoring logic:
-  - retracted_citation_flag_count: weight 3.0 (citing known-retracted work is very suspicious)
-  - reference_integrity_flag_count: weight 1.5 (unresolvable references suggest fabrication)
+  - retracted_citation_flag_count: weight 3.0 (citing known-retracted work is very suspicious;
+    graph-internal only -- see external_retracted_citation_flag_count below for the complement)
+  - external_retracted_citation_flag_count: weight 2.0 (citing a retracted paper OUTSIDE our
+    Retraction-Watch-seeded corpus, confirmed live via OpenAlex's is_retracted field -- a
+    confirmed fact, not a heuristic search, so it's safe to score. Lower than the 3.0 sibling
+    because it lacks RetractionWatch's timing/misconduct-reason/self-citation context -- see
+    sensors/external_retracted_citation_checker.py, added 2026-07-20.)
+  - reference_integrity_flag_count: NOT scored (see WEIGHTS comment below — corpus-specific
+    false-positive rate, 2026-07-20)
   - journal_integrity_flag_count: weight 1.0 (publishing in compromised journals)
   - ai_text_tell_flag_count: weight 2.0 (obvious AI generation is suspicious)
   - p_value_hacking_flag_count: weight 0.5 (lowest weight -- plan.md explicitly
@@ -68,10 +75,26 @@ from normalize_authors import resolve_connection  # noqa: E402
 # gds_misconduct_prob is deliberately NOT weighted in — it is a weak, capped,
 # domain-shifted learned prior (see gds_node_classification.py) and rides along
 # only as a labeled secondary column for the reviewer.
+#
+# DO NOT add image-forensics, paperconan, PubPeer, GDS, or reference_integrity_flag_count
+# keys here. Those are soft / signal-not-verdict inputs shown as labelled review
+# context only (plan.md §0); scoring them would silently turn a hypothesis into
+# a weighted accusation.
+#   reference_integrity_flag_count excluded 2026-07-20: Route 1 (DOI-based
+#   lookup against Crossref, now cross-checked against the universal doi.org
+#   resolver) is precise, but Route 2 (title/author bibliographic search when a
+#   reference has no DOI) flagged 71% of the corpus HIGH -- overwhelmingly
+#   real, legitimate microbiology citations that just don't index well for
+#   title search (Bergey's Manual taxonomic chapters, pre-DOI species-naming
+#   authorities, LPSN, gray literature). Until Route 2 is fixed or split out,
+#   its counts are noise, not signal -- see sensors/reference_integrity_checker.py.
+# This WEIGHTS dict is the single source of truth — build_review_page.py and
+# flag_evidence_report.py import it (see #7 in BUG.md); keep every weight
+# here, not copied.
 WEIGHTS = {
     # sensor flags
     "retracted_citation_flag_count": 3.0,
-    "reference_integrity_flag_count": 1.5,
+    "external_retracted_citation_flag_count": 2.0,
     "journal_integrity_flag_count": 1.0,
     "ai_text_tell_flag_count": 2.0,
     "p_value_hacking_flag_count": 0.5,
@@ -94,6 +117,7 @@ RETURN p.doi AS doi,
        p.published_date AS published_date,
        p.cited_by_count AS cited_by_count,
        coalesce(p.retracted_citation_flag_count, 0) AS ret_count,
+       coalesce(p.external_retracted_citation_flag_count, 0) AS ext_ret_count,
        coalesce(p.reference_integrity_flag_count, 0) AS ref_count,
        coalesce(p.journal_integrity_flag_count, 0) AS journal_count,
        coalesce(p.ai_text_tell_flag_count, 0) AS ai_count,
@@ -109,6 +133,7 @@ RETURN p.doi AS doi,
        coalesce(p.journal_retr_rate, 0.0) AS journal_retr_rate,
        p.gds_misconduct_prob AS gds_prob,
        p.retracted_citation_flags AS ret_flags,
+       p.external_retracted_citation_flags AS ext_ret_flags,
        p.reference_integrity_flags AS ref_flags,
        p.journal_integrity_flags AS journal_flags,
        p.ai_text_tell_flags AS ai_flags,
@@ -120,7 +145,8 @@ def calculate_score(row: dict) -> float:
     """Weighted explainable score (sensor flags + graph features)."""
     return (
         row["ret_count"] * WEIGHTS["retracted_citation_flag_count"] +
-        row["ref_count"] * WEIGHTS["reference_integrity_flag_count"] +
+        row["ext_ret_count"] * WEIGHTS["external_retracted_citation_flag_count"] +
+        # reference_integrity_flag_count deliberately excluded -- see WEIGHTS comment above
         row["journal_count"] * WEIGHTS["journal_integrity_flag_count"] +
         row["ai_count"] * WEIGHTS["ai_text_tell_flag_count"] +
         row["pval_count"] * WEIGHTS["p_value_hacking_flag_count"] +
@@ -163,6 +189,7 @@ def main() -> None:
             "cited_by_count": row["cited_by_count"],
             "score": round(score, 2),
             "retracted_citation_count": row["ret_count"],
+            "external_retracted_citation_count": row["ext_ret_count"],
             "reference_integrity_count": row["ref_count"],
             "journal_integrity_count": row["journal_count"],
             "ai_text_tell_count": row["ai_count"],
@@ -201,6 +228,7 @@ def main() -> None:
         "cited_by_count",
         # sensor flags
         "retracted_citation_count",
+        "external_retracted_citation_count",
         "reference_integrity_count",
         "journal_integrity_count",
         "ai_text_tell_count",
@@ -260,7 +288,8 @@ def main() -> None:
     for i, r in enumerate(results[:5], 1):
         gds = f" | GDS {r['gds_misconduct_prob']}{'⚑' if r['gds_flagged']=='Y' else ''}" if r['gds_misconduct_prob'] != "" else ""
         print(f"  {i}. [{r['score']:.1f}] {r['title'][:70]}...", file=sys.stderr)
-        print(f"     ret{r['retracted_citation_count']} ref{r['reference_integrity_count']} "
+        print(f"     ret{r['retracted_citation_count']} extret{r['external_retracted_citation_count']} "
+              f"ref{r['reference_integrity_count']} "
               f"jrnl{r['journal_integrity_count']} ai{r['ai_text_tell_count']} "
               f"coauthor-misconduct{r['coauthor_misconduct']} jrr{r['journal_retr_rate']}{gds}", file=sys.stderr)
         print(f"     {r['doi']} ({r['journal']})", file=sys.stderr)

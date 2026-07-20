@@ -242,8 +242,11 @@ def europepmc_full_text(doi: str) -> dict | None:
         if not pmcid:
             return None
 
-        ft_url = f"{base}/{pmcid}/fullText"
-        rr = _get(ft_url, timeout=20)
+        # /fullTextXML is the real endpoint (returns JATS XML). The old code used
+        # /fullText, which 404s — so Europe PMC, the best OA source, never fired
+        # and in-PMC papers fell through to short Crossref landing-page text.
+        ft_url = f"{base}/{pmcid}/fullTextXML"
+        rr = _get(ft_url, timeout=30)
         if rr.status_code in (404, 403, 401):
             return None
         rr.raise_for_status()
@@ -300,42 +303,57 @@ def pmc_us_full_text(doi: str) -> dict | None:
         return None
 
 
-def fetch_full_text(doi: str, cache_dir: Path | None = None) -> dict:
-    """Fetch full text with caching."""
+# A result shorter than this is a landing page / abstract, not real full text.
+# Real OA full text is typically >15k chars; landing pages are <3k.
+MIN_FULLTEXT = 4000
+
+
+def fetch_full_text(doi: str, cache_dir: Path | None = None, force: bool = False) -> dict:
+    """Fetch full text with caching.
+
+    Sources are tried best-first (Europe PMC JATS XML is real, complete full
+    text; Crossref/Unpaywall links are often just landing pages), and the LONGEST
+    successful text wins — so a short Crossref result never shadows real full
+    text. Stops early once a source clears MIN_FULLTEXT. `force` re-fetches even
+    a cached result (used to re-run past the old broken-endpoint cache)."""
     canonical = canon_doi(doi)
     if not canonical:
         return {"doi": doi, "status": "error", "source": None, "url": None, "text": "", "error": "empty DOI"}
 
+    cache_file = None
     if cache_dir:
         cache_dir = Path(cache_dir)
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_file = cache_dir / f"{canonical.replace('/', '__')}.json"
-        if cache_file.exists():
+        if cache_file.exists() and not force:
             try:
                 cached = json.loads(cache_file.read_text())
-                if cached.get("doi") == canonical:
+                # Trust the cache only if it's already good full text — otherwise
+                # fall through and retry (the old cache is full of short results).
+                if cached.get("doi") == canonical and len(cached.get("text") or "") >= MIN_FULLTEXT:
                     return cached
             except Exception:  # noqa: BLE001
                 pass
 
-    result = (
-        crossref_full_text(canonical)
-        or unpaywall_full_text(canonical)
-        or europepmc_full_text(canonical)
-        or pmc_us_full_text(canonical)
-    )
+    best = None
+    for source_fn in (europepmc_full_text, crossref_full_text, unpaywall_full_text, pmc_us_full_text):
+        r = source_fn(canonical)
+        if r and r.get("text"):
+            if best is None or len(r["text"]) > len(best["text"]):
+                best = r
+            if len(best["text"]) >= MIN_FULLTEXT:
+                break  # good enough — real full text, stop
 
-    if not result:
-        result = {
-            "doi": canonical,
-            "status": "not_open_access",
-            "source": None,
-            "url": None,
-            "text": "",
-            "error": "no open-access full-text source found via Crossref/Europe PMC/PMC",
-        }
+    result = best or {
+        "doi": canonical,
+        "status": "not_open_access",
+        "source": None,
+        "url": None,
+        "text": "",
+        "error": "no open-access full-text source found via Europe PMC/Crossref/Unpaywall/PMC",
+    }
 
-    if cache_dir and cache_file:
+    if cache_file:
         cache_file.write_text(json.dumps(result, indent=2))
 
     return result
