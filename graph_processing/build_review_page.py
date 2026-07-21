@@ -315,6 +315,8 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
         # self-citations first — they're the stronger signal
         flags = sorted(flags, key=lambda f: not f.get("self_citation"))
         items = "".join(_ret_item(f) for f in flags[:4])
+        if len(flags) > 4:
+            items += f'<li class="muted">…and {len(flags) - 4} more</li>'
         n_self = sum(1 for f in flags if f.get("self_citation"))
         caveat = ""
         if n_self:
@@ -337,6 +339,8 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             f'{esc((f.get("cited_retracted_paper_title") or "")[:80])}</a></li>'
             for f in ext_flags[:4]
         )
+        if len(ext_flags) > 4:
+            items += f'<li class="muted">…and {len(ext_flags) - 4} more</li>'
         parts.append(row(
             f'Cites retracted work — external ({r["ext_ret_count"]})',
             r["ext_ret_count"] * WEIGHTS["external_retracted_citation_flag_count"],
@@ -363,6 +367,8 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
     if r["ai_count"] > 0:
         flags = json.loads(r["ai_flags"] or "[]")
         pats = ", ".join(esc(f.get("pattern")) for f in flags[:4])
+        if len(flags) > 4:
+            pats += f' <span class="muted">…and {len(flags) - 4} more</span>'
         parts.append(row(f'AI-text tells ({r["ai_count"]})', r["ai_count"] * WEIGHTS["ai_text_tell_flag_count"], pats))
 
     if r["pval_count"] > 0:
