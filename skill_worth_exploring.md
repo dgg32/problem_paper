@@ -92,3 +92,37 @@ Consequences already applied:
   repo — build it) + flagged-papers DB at scigendetection.imag.fr/TPD52.
 - **Gap 4 — agent-side adjudication:** `wanshuiyin/Anti-Autoresearch` (101★ MIT — *mine the architecture*),
   `jpliem/gunting` (0★, README 404 — watch, don't adopt).
+
+---
+
+## Metadata-only sensors (2026-07-21)
+
+*PDF‑free / full‑text‑free signals that run on graph + OpenAlex/Crossref/ORCID
+metadata only. Evaluated against the same corpus constraint (microbiology‑first,
+plan.md §0 scoring discipline).*
+
+| Sensor | Verdict | Why |
+|---|---|---|
+| **Institutional retraction rate** (graph‑only) | ⚡ **Build now** | Pure‑Cypher, same pattern as `journal_retr_rate` (§2.2e) but aggregated per institution via OpenAlex ROR/affiliation. Catches the Hindawi/mill‑hospital‑affiliation pattern as a hard, sourced fact. Slots into existing Tier‑A weighted score. |
+| **Corrections/errata‑history** (Crossref) | ⚡ **Build now** | Crossref `relation`/`update-to` over `type:correction` — metadata‑only, no full text. Multiple corrections on one paper (or an author with correction‑dense corpus) is a hard fact. Near‑zero FP as *signal*; keep low‑weight or not‑scored since corrections are often honest, but valuable as explainable context. |
+| **Author output‑burst / hyperprolific** (OpenAlex) | ✅ **Graph feature, unbuilt** | Reserved in plan.md §2.2 but never implemented. OpenAlex per‑author works/year — sudden >20 papers/year or a burst in a new field is the classic mill/authorship‑for‑sale signature. Pure metadata, cheap, fits Phase 2 graph features. |
+| **Author topic‑drift** (OpenAlex) | ✅ **Build when hyperprolific is done** | OpenAlex per‑author topics vs. candidate paper's topic. A nephrologist co‑authoring oncology knockdown papers is a mill‑fingerprint. Follows same extraction path as hyperprolific; share the author baseline fetch. **Soft signal — not scored** per §0. |
+| **Citing‑side reputation** (graph‑only) | ✅ **Graph feature, unbuilt** | Inverse of retracted‑citation checker: is this paper *cited predominantly by* papers that were later retracted (or by one mill cluster)? Entirely graph‑internal. **Not scored** (guilt‑by‑citation‑neighbourhood is associative, not a hard fact) — label on review card alongside GDS prior and PubPeer counts. |
+| **Duplicate title/abstract** (OpenAlex) | ⏸️ **Defer — needs MinHash/embedding** | Corpus‑wide near‑duplicate detection via OpenAlex `abstract_inverted_index` (metadata, not full text). Catches salami‑sliced papers and mill template‑abstract batches. Higher engineering effort; revisit when duplicate‑title lookups in literature show mill clustering. |
+| **Mill title‑template matcher** (metadata) | ⏸️ **Defer — combine with duplicate‑detect** | Regex/heuristic templates on title alone ("X alleviates Y via miR‑Z axis in…"). Weak alone — legit papers use these — but sharpens as a filter for the duplicate‑abstract clusterer. Hold until that's built. |
+| **Special‑issue / guest‑editor flag** (metadata) | ⏸️ **Defer — needs issue data ingestion** | Journal+issue metadata: papers in issues with known mass retractions (Hindawi 2023, MDPI guest‑editor scandals). Computable once issue info is in the graph. Moderate effort to backfill; high signal when it fires. |
+| **ORCID provenance** (ORCID API + OpenAlex) | ⏸️ **Defer — soft, low base rate** | ORCID created shortly before publication, single‑work ORCIDs, no employment history on senior author. Cheap but low base rate on this corpus (many authors lack ORCIDs at all). **Not scored** — store as review‑page context if the data's there. |
+| **Crossref metadata anomalies** (Crossref) | ❌ **Skip** | Missing DOIs in references, extreme ref counts, missing funder/license on OA‑claimed papers — each is cheap to check but every one has a legitimate explanation. Too noisy per §0's "hard, sourced facts" rule. |
+
+### Scoring‑discipline mapping (per AGENTS.md / plan.md §0)
+
+- **Weighted in Tier A:** institutional retraction rate only (same pattern as `journal_retr_rate`). Corrections‑history could be weighted if empirical FP rate proves low — for now keep as labelled context.
+- **Labelled but NOT scored (review‑card context):** author output‑burst, topic‑drift, citing‑side reputation, ORCID provenance. Same bucket as PubPeer counts and GDS prior.
+- **Deferred / skipped entirely:** everything else in the table above — either too noisy, too high‑effort, or zero corpus overlap.
+
+### Recommended order (microbiology‑first, metadata‑only)
+
+1. **Institutional retraction rate** (1–2 hrs, pure Cypher, reuses `journal_retr_rate` pattern exactly, hard fact → Tier A). Referenced in plan.md §2.2(g) as "shared‑institution" — this is that reserved slot, now actionable.
+2. **Corrections/errata‑history** (1–2 hrs, Crossref REST API batch, stored as `Paper.update_count`, `Paper.has_correction`). Low weight initially but high explainability.
+3. **Author output‑burst + topic‑drift** (3–4 hrs, shares OpenAlex per‑author fetch with hyperprolific — do as a pair). Both stay not‑scored.
+4. **Citing‑side reputation** (1–2 hrs, graph‑internal, pure Cypher). Not‑scored context alongside GDS prior.

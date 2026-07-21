@@ -37,6 +37,16 @@ Scoring logic:
     matched, both already-retracted -- the machinery is in place for future
     re-runs as ORI publishes new findings, but don't expect this to move the
     current ranking much.)
+  - institution_retr_rate: weight 1.5 (an institution's own measured
+    retraction rate in this graph, max across a paper's INVOLVES institutions
+    -- same hard-fact reasoning as journal_retr_rate; see
+    graph_processing/institution_retraction_rate.py, added 2026-07-21.)
+  - crossref_correction_flag_count: weight 0.3 (tied with pubmed_erratum_flag
+    -- found via Crossref's updates:{doi} reverse lookup, i.e. a correction
+    notice's own record explicitly links back to this DOI (update-to); a
+    real, dated, publisher-deposited fact, but corrections are routinely
+    benign (typo/affiliation fixes), so kept low deliberately. See
+    graph_processing/refresh_correction_history.py, added 2026-07-21.)
 
 Score = sum of (flag_count * weight) for each sensor.
 
@@ -149,6 +159,10 @@ DEFAULT_WEIGHTS = {
     # graph features (Neo4j)
     "coauthor_other_misconduct": 1.5,   # per probable-person co-author with a misconduct paper elsewhere
     "journal_retr_rate": 2.0,           # rate in [0,1]; granular complement to the journal flag
+    "institution_retr_rate": 1.5,       # rate in [0,1]; max across a paper's INVOLVES institutions
+                                         # (see graph_processing/institution_retraction_rate.py)
+    "crossref_correction_flag_count": 0.3,  # Crossref-deposited correction notices on this DOI;
+                                             # low weight, corrections are often benign (see refresh_correction_history.py)
     # paperconan (filesystem, not the graph — see load_paperconan_runs() above)
     "paperconan_needs_human": 2.0,      # an opened, quantified anomaly that survived adjudication
     "paperconan_confirmed": 4.0,        # tied with ori_finding_flag as the strongest signal here
@@ -208,6 +222,11 @@ RETURN p.doi AS doi,
        p.ori_respondent_name AS ori_respondent,
        coalesce(p.coauthor_other_misconduct, 0) AS coauthor_misconduct,
        coalesce(p.journal_retr_rate, 0.0) AS journal_retr_rate,
+       coalesce(p.institution_retr_rate, 0.0) AS institution_retr_rate,
+       p.institution_retr_rate_name AS institution_retr_rate_name,
+       p.institution_retr_rate_n AS institution_retr_rate_n,
+       coalesce(p.crossref_correction_count, 0) AS correction_count,
+       p.crossref_correction_dois AS correction_dois,
        p.gds_misconduct_prob AS gds_prob,
        p.retracted_citation_flags AS ret_flags,
        p.external_retracted_citation_flags AS ext_ret_flags,
@@ -233,6 +252,8 @@ def calculate_score(row: dict) -> float:
         row["ori_flag"] * WEIGHTS["ori_finding_flag"] +
         row["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"] +
         row["journal_retr_rate"] * WEIGHTS["journal_retr_rate"] +
+        row["institution_retr_rate"] * WEIGHTS["institution_retr_rate"] +
+        row["correction_count"] * WEIGHTS["crossref_correction_flag_count"] +
         (WEIGHTS["paperconan_needs_human"] if adj == "needs_human" else 0.0) +
         (WEIGHTS["paperconan_confirmed"] if adj == "confirmed" else 0.0)
     )
@@ -287,6 +308,9 @@ def main() -> None:
             "ori_respondent": row["ori_respondent"] or "",
             "coauthor_misconduct": row["coauthor_misconduct"],
             "journal_retr_rate": round(row["journal_retr_rate"], 3),
+            "institution_retr_rate": round(row["institution_retr_rate"], 3),
+            "institution_retr_rate_name": row["institution_retr_rate_name"] or "",
+            "correction_count": row["correction_count"],
             "paperconan_adjudication": row["paperconan_adjudication"] or "",
             # secondary, labeled, NOT in score:
             "gds_misconduct_prob": round(gds_prob, 3) if gds_prob is not None else "",
@@ -328,6 +352,9 @@ def main() -> None:
         # graph features (in score)
         "coauthor_misconduct",
         "journal_retr_rate",
+        "institution_retr_rate",
+        "institution_retr_rate_name",
+        "correction_count",
         "paperconan_adjudication",
         # secondary learned prior (NOT in score)
         "gds_misconduct_prob",
@@ -378,7 +405,8 @@ def main() -> None:
         print(f"     ret{r['retracted_citation_count']} extret{r['external_retracted_citation_count']} "
               f"ref{r['reference_integrity_count']} "
               f"jrnl{r['journal_integrity_count']} ai{r['ai_text_tell_count']} "
-              f"coauthor-misconduct{r['coauthor_misconduct']} jrr{r['journal_retr_rate']}{gds}", file=sys.stderr)
+              f"coauthor-misconduct{r['coauthor_misconduct']} jrr{r['journal_retr_rate']} "
+              f"irr{r['institution_retr_rate']} corr{r['correction_count']}{gds}", file=sys.stderr)
         print(f"     {r['doi']} ({r['journal']})", file=sys.stderr)
 
 

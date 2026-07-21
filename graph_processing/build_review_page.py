@@ -120,6 +120,11 @@ RETURN p.doi AS doi, p.title AS title, j.name AS journal,
        p.ori_finding_date AS ori_date,
        coalesce(p.coauthor_other_misconduct, 0) AS coauthor_misconduct,
        coalesce(p.journal_retr_rate, 0.0) AS journal_retr_rate,
+       coalesce(p.institution_retr_rate, 0.0) AS institution_retr_rate,
+       p.institution_retr_rate_name AS institution_retr_rate_name,
+       p.institution_retr_rate_n AS institution_retr_rate_n,
+       coalesce(p.crossref_correction_count, 0) AS correction_count,
+       p.crossref_correction_dois AS correction_dois,
        p.gds_misconduct_prob AS gds_prob,
        coalesce(p.pubpeer_comments_total, 0) AS pubpeer_total,
        p.pubpeer_check_url AS pubpeer_url,
@@ -161,6 +166,8 @@ def score(r: dict) -> float:
         + r["ori_flag"] * WEIGHTS["ori_finding_flag"]
         + r["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"]
         + r["journal_retr_rate"] * WEIGHTS["journal_retr_rate"]
+        + r["institution_retr_rate"] * WEIGHTS["institution_retr_rate"]
+        + r["correction_count"] * WEIGHTS["crossref_correction_flag_count"]
         + (WEIGHTS["paperconan_needs_human"] if adj == "needs_human" else 0.0)
         + (WEIGHTS["paperconan_confirmed"] if adj == "confirmed" else 0.0)
     )
@@ -354,6 +361,27 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             "Journal retraction rate",
             r["journal_retr_rate"] * WEIGHTS["journal_retr_rate"],
             f'{esc(r["journal"])} has a measured {r["journal_retr_rate"]:.1%} retraction rate in this graph.',
+        ))
+
+    if r["institution_retr_rate"] > 0:
+        parts.append(row(
+            "Institution retraction rate",
+            r["institution_retr_rate"] * WEIGHTS["institution_retr_rate"],
+            f'{esc(r["institution_retr_rate_name"])} has a measured {r["institution_retr_rate"]:.1%} '
+            f'retraction rate in this graph (n={r["institution_retr_rate_n"]} papers).',
+        ))
+
+    if r["correction_count"] > 0:
+        correction_dois = json.loads(r["correction_dois"] or "[]")
+        items = "".join(
+            f'<li><a href="https://doi.org/{esc(d)}" target="_blank" rel="noopener">{esc(d)}</a></li>'
+            for d in correction_dois[:4]
+        )
+        parts.append(row(
+            f'Crossref correction notice ({r["correction_count"]})',
+            r["correction_count"] * WEIGHTS["crossref_correction_flag_count"],
+            '<p class="caveat">Corrections are often benign (typo/affiliation fixes) -- kept low-weight.</p>'
+            f'<ul>{items}</ul>',
         ))
 
     if r["journal_count"] > 0:
@@ -665,6 +693,10 @@ PAGE_TEMPLATE = """<!doctype html>
   .pager button:disabled {{ opacity:.4; cursor:default; }}
   .pager button:not(:disabled):hover {{ border-color:var(--accent); }}
   .pager-info {{ font-variant-numeric:tabular-nums; white-space:nowrap; }}
+  .pager-info input.page-jump {{ width:44px; padding:3px 5px; margin:0 2px; border:1px solid var(--line);
+    border-radius:6px; background:var(--card); color:var(--fg); font-size:.85rem; text-align:center;
+    font-variant-numeric:tabular-nums; }}
+  .pager-info input.page-jump:focus {{ border-color:var(--accent); outline:none; }}
 </style>
 </head>
 <body>
@@ -698,7 +730,14 @@ PAGE_TEMPLATE = """<!doctype html>
 </div>
 <div class="pager" id="pagerTop">
   <button id="prevTop" onclick="gotoPage(page-1)">← prev</button>
-  <span class="pager-info" id="pageInfoTop"></span>
+  <span class="pager-info">
+    <span id="pageInfoNormalTop">page
+      <input type="number" class="page-jump" id="jumpTop" min="1" value="1"
+        onkeydown="if(event.key==='Enter'){{doJump(this.value);this.blur();}}"
+        onchange="doJump(this.value)">
+      of <span id="totalTop"></span> (<span id="rangeTop"></span>)</span>
+    <span id="pageInfoEmptyTop" style="display:none;">no papers match</span>
+  </span>
   <button id="nextTop" onclick="gotoPage(page+1)">next →</button>
 </div>
 <main id="list">
@@ -706,7 +745,14 @@ PAGE_TEMPLATE = """<!doctype html>
 </main>
 <div class="pager" id="pagerBottom">
   <button id="prevBottom" onclick="gotoPage(page-1)">← prev</button>
-  <span class="pager-info" id="pageInfoBottom"></span>
+  <span class="pager-info">
+    <span id="pageInfoNormalBottom">page
+      <input type="number" class="page-jump" id="jumpBottom" min="1" value="1"
+        onkeydown="if(event.key==='Enter'){{doJump(this.value);this.blur();}}"
+        onchange="doJump(this.value)">
+      of <span id="totalBottom"></span> (<span id="rangeBottom"></span>)</span>
+    <span id="pageInfoEmptyBottom" style="display:none;">no papers match</span>
+  </span>
   <button id="nextBottom" onclick="gotoPage(page+1)">next →</button>
 </div>
 <script>
@@ -761,10 +807,18 @@ PAGE_TEMPLATE = """<!doctype html>
     const s = document.getElementById('shown');
     s.textContent = (query || activeTags.size) ? `showing ${{filtered.length}} of ${{cards.length}}` : '';
 
-    const info = filtered.length
-      ? `page ${{page}} of ${{totalPages}} (${{start + 1}}–${{Math.min(end, filtered.length)}} of ${{filtered.length}})`
-      : 'no papers match';
-    ['pageInfoTop', 'pageInfoBottom'].forEach(id => document.getElementById(id).textContent = info);
+    ['Top', 'Bottom'].forEach(suf => {{
+      document.getElementById('pageInfoNormal' + suf).style.display = filtered.length ? '' : 'none';
+      document.getElementById('pageInfoEmpty' + suf).style.display = filtered.length ? 'none' : '';
+      if (filtered.length) {{
+        const jump = document.getElementById('jump' + suf);
+        jump.max = totalPages;
+        jump.value = page;
+        document.getElementById('total' + suf).textContent = totalPages;
+        document.getElementById('range' + suf).textContent =
+          `${{start + 1}}–${{Math.min(end, filtered.length)}} of ${{filtered.length}}`;
+      }}
+    }});
     ['prevTop', 'prevBottom'].forEach(id => document.getElementById(id).disabled = page <= 1);
     ['nextTop', 'nextBottom'].forEach(id => document.getElementById(id).disabled = page >= totalPages);
   }}
@@ -773,6 +827,11 @@ PAGE_TEMPLATE = """<!doctype html>
     page = n;
     renderPage();
     document.getElementById('list').scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+  }}
+
+  function doJump(v) {{
+    const n = parseInt(v, 10);
+    if (!isNaN(n)) gotoPage(n);
   }}
 
   function doFilter(v) {{ query = v.toLowerCase(); applyFilters(); }}

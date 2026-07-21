@@ -31,6 +31,8 @@ ori_finding_flag: 4.0                     # federal ORI misconduct finding namin
 # graph features (Neo4j)
 coauthor_other_misconduct: 1.5            # per probable-person co-author with a misconduct paper elsewhere
 journal_retr_rate: 2.0                    # journal's retraction rate in [0,1]; granular complement to journal_integrity_flag_count
+institution_retr_rate: 1.5                # institution's retraction rate in [0,1]; max across a paper's INVOLVES institutions
+crossref_correction_flag_count: 0.3       # Crossref-deposited correction notices on this DOI; low weight, often benign
 
 # paperconan (filesystem-derived, see load_paperconan_runs() in tier_a_scoring.py)
 # Only these two ADJUDICATED verdicts are scored -- never raw high/medium/low counts.

@@ -44,6 +44,26 @@ The review page (`review/*.html`, built by
 git-ignored and **must never be published or shared** (plan.md §7) — keep it a
 local file.
 
+### Reproducing the graph on a new machine
+
+Before running the full pipeline from scratch (`build_instances.py → ... →
+mark_adjudication.py → Phase-4 sensors → gds_node_classification.py →
+tier_a_scoring.py` — a lengthy, API-bound chain), check for
+`data/graph/full_graph_snapshot.jsonl`. If present, run
+`python graph_processing/import_graph_snapshot.py` instead against a fresh
+Neo4j instance — it restores every node/relationship/property the whole
+pipeline would have produced, in a couple of minutes, no OpenAlex/Crossref/
+PubMed calls needed. `data/` is git-ignored and carried between machines by
+hand (same as `.env.yaml` and `retraction_watch.csv`), so this file travels
+with the rest of `data/graph/` — no separate copy step.
+
+After any run that meaningfully changes the graph (a new sensor, a fresh
+Phase-4 scan, expanded targets), re-run
+`python graph_processing/export_graph_snapshot.py` so the snapshot stays
+current for the next machine. See both scripts' docstrings for how the
+export/import mechanism works (streamed APOC JSON export, matched on each
+label's natural key on import — never Neo4j's internal id).
+
 ### New automated data sources
 
 Before adding any script that auto-fetches from an external site, check its

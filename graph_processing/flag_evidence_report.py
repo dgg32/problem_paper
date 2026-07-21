@@ -17,6 +17,10 @@ and expands every contributing signal into named, sourced evidence:
     a paper retracted for a misconduct-signal reason," not "formally
     adjudicated." Keep that distinction in any human-facing copy.
   - journal_retr_rate: the journal's measured retraction rate in this graph.
+  - institution_retr_rate: the (worst) involved institution's measured
+    retraction rate in this graph -- see institution_retraction_rate.py.
+  - crossref_correction_flag_count: Crossref-deposited correction notice(s)
+    on this DOI -- see refresh_correction_history.py.
   - gds_misconduct_prob: the Tier-B GDS node-classification prior, surfaced
     as a labeled, non-scored secondary signal only (see gds_node_classification.py
     for why it is capped/weak/domain-shifted and deliberately excluded from
@@ -67,6 +71,11 @@ RETURN p.doi AS doi,
        coalesce(p.ai_text_tell_flag_count, 0) AS ai_count,
        coalesce(p.coauthor_other_misconduct, 0) AS coauthor_misconduct,
        coalesce(p.journal_retr_rate, 0.0) AS journal_retr_rate,
+       coalesce(p.institution_retr_rate, 0.0) AS institution_retr_rate,
+       p.institution_retr_rate_name AS institution_retr_rate_name,
+       p.institution_retr_rate_n AS institution_retr_rate_n,
+       coalesce(p.crossref_correction_count, 0) AS correction_count,
+       p.crossref_correction_dois AS correction_dois,
        p.gds_misconduct_prob AS gds_prob,
        p.retracted_citation_flags AS ret_flags,
        p.external_retracted_citation_flags AS ext_ret_flags,
@@ -98,7 +107,9 @@ def calculate_score(row: dict) -> float:
         row["journal_count"] * WEIGHTS["journal_integrity_flag_count"] +
         row["ai_count"] * WEIGHTS["ai_text_tell_flag_count"] +
         row["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"] +
-        row["journal_retr_rate"] * WEIGHTS["journal_retr_rate"]
+        row["journal_retr_rate"] * WEIGHTS["journal_retr_rate"] +
+        row["institution_retr_rate"] * WEIGHTS["institution_retr_rate"] +
+        row["correction_count"] * WEIGHTS["crossref_correction_flag_count"]
     )
 
 
@@ -231,6 +242,29 @@ def main() -> None:
                     "weight": WEIGHTS["journal_retr_rate"],
                     "contribution": round(row["journal_retr_rate"] * WEIGHTS["journal_retr_rate"], 2),
                     "note": f"{row['journal']} has a {row['journal_retr_rate']:.1%} retraction rate in this graph.",
+                })
+
+            if row["institution_retr_rate"] > 0:
+                flags_summary.append({
+                    "type": "institution_retr_rate",
+                    "value": round(row["institution_retr_rate"], 3),
+                    "weight": WEIGHTS["institution_retr_rate"],
+                    "contribution": round(row["institution_retr_rate"] * WEIGHTS["institution_retr_rate"], 2),
+                    "note": (f"{row['institution_retr_rate_name']} has a {row['institution_retr_rate']:.1%} "
+                             f"retraction rate in this graph (n={row['institution_retr_rate_n']} papers)."),
+                })
+
+            if row["correction_count"] > 0:
+                correction_dois = json.loads(row["correction_dois"] or "[]")
+                flags_summary.append({
+                    "type": "crossref_correction_flag_count",
+                    "count": row["correction_count"],
+                    "weight": WEIGHTS["crossref_correction_flag_count"],
+                    "contribution": round(row["correction_count"] * WEIGHTS["crossref_correction_flag_count"], 2),
+                    "note": ("A correction notice's own Crossref record links back to this DOI "
+                             "(update-to) -- corrections are often benign, kept low-weight; "
+                             "see graph_processing/refresh_correction_history.py."),
+                    "examples": correction_dois[:3],
                 })
 
             report.append({
