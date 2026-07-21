@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipeline Ops Dashboard</title>
+<script src="https://unpkg.com/htmx.org@2.0.4"></script>
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --line:#e3e3e6; --card:#fafafa;
+          --accent:#7a5cff; --ok:#15803d; --fail:#b91c1c; --warn:#92400e; --warnbg:#fef3c7; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#16161a; --fg:#e8e8ea; --muted:#9a9aa2; --line:#2c2c33; --card:#1d1d22;
+             --accent:#9d86ff; --ok:#4ade80; --fail:#f87171; --warn:#fcd34d; --warnbg:#3a2f10; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  header { max-width:1100px; margin:0 auto; padding:24px 20px 8px; }
+  h1 { font-size:1.4rem; margin:0 0 4px; }
+  .gen { color:var(--muted); font-size:.85rem; }
+  .top-actions { max-width:1100px; margin:12px auto; padding:0 20px; display:flex; gap:10px; align-items:center; }
+  main { max-width:1100px; margin:0 auto; padding:0 20px 60px; }
+  section { margin:26px 0; }
+  section h2 { font-size:1.05rem; margin:0 0 10px; padding-bottom:6px; border-bottom:1px solid var(--line); }
+  table { width:100%; border-collapse:collapse; }
+  td { padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; font-size:.9rem; }
+  .s-label { white-space:nowrap; font-weight:500; }
+  .s-time { white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .s-note { max-width:420px; }
+  .s-action { white-space:nowrap; }
+  .muted { color:var(--muted); }
+  .tag { font-size:.7rem; padding:1px 7px; border-radius:10px; margin-left:6px;
+         background:color-mix(in srgb, var(--warn) 25%, transparent); color:var(--warn); }
+  .badge { font-size:.78rem; padding:3px 9px; border-radius:20px; white-space:nowrap; }
+  .badge-idle { background:color-mix(in srgb, var(--muted) 20%, transparent); color:var(--muted); }
+  .badge-running { background:color-mix(in srgb, var(--accent) 20%, transparent); color:var(--accent); }
+  .badge-ok { background:color-mix(in srgb, var(--ok) 20%, transparent); color:var(--ok); }
+  .badge-fail { background:color-mix(in srgb, var(--fail) 20%, transparent); color:var(--fail); }
+  button { padding:6px 14px; border:1px solid var(--line); border-radius:7px; background:var(--card);
+           color:var(--fg); cursor:pointer; font-size:.85rem; }
+  button:disabled { opacity:.4; cursor:default; }
+  button:not(:disabled):hover { border-color:var(--accent); }
+  .run-all { background:var(--accent); color:#fff; border-color:var(--accent); font-weight:600; }
+  .s-output { margin-top:6px; }
+  .s-output summary { cursor:pointer; color:var(--muted); font-size:.8rem; }
+  .s-output pre { max-height:280px; overflow:auto; background:var(--card); border:1px solid var(--line);
+                  border-radius:7px; padding:8px 10px; font-size:.78rem; white-space:pre-wrap; word-break:break-word; }
+  .banner { max-width:1100px; margin:0 auto 16px; padding:10px 20px; border-radius:8px; font-size:.88rem; }
+  .banner-running { background:color-mix(in srgb, var(--accent) 14%, transparent); color:var(--accent); }
+  .banner-fail { background:color-mix(in srgb, var(--fail) 16%, transparent); color:var(--fail); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pipeline Ops Dashboard</h1>
+  <div class="gen">Private local tool — same audience as review/index.html, not for sharing.
+    Runs the exact scripts you'd run from the CLI, one click at a time.</div>
+</header>
+
+<div id="batch-status-wrap">
+  {% include "_batch_status.html" %}
+</div>
+
+<div class="top-actions">
+  <button class="run-all" hx-post="/run-all" hx-target="#batch-status-wrap" hx-swap="innerHTML"
+          hx-confirm="Run the full pipeline (identity/expansion → Phase-4 sensors → scoring)? This can take well over an hour. reference_integrity_checker.py and the snapshot scripts are excluded — run those manually below if needed."
+          {% if batch.running %}disabled{% endif %}>
+    ▶ Run FULL pipeline
+  </button>
+  <span class="muted">runs every non-optional stage below, in order; stops on first failure</span>
+</div>
+
+<main>
+  {% for cat in categories %}
+  <section>
+    <h2>
+      {{ cat.label }}
+      <button style="float:right; font-weight:400;"
+              hx-post="/run-category/{{ cat.id }}" hx-target="#batch-status-wrap" hx-swap="innerHTML"
+              hx-confirm="Run every stage in “{{ cat.label }}”, in order?"
+              {% if batch.running %}disabled{% endif %}>
+        ▶ run this section
+      </button>
+    </h2>
+    <table>
+      <tbody>
+        {% for stage, state in cat.stages %}
+        {% include "_stage_row.html" %}
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endfor %}
+</main>
+</body>
+</html>

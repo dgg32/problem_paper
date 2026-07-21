@@ -33,9 +33,45 @@ python -m http.server 8899 --bind 127.0.0.1 --directory review
 ## Status
 
 - **Built:** read-first static page — ranked cards, 🚩 priority gauge, per-signal
-  evidence (incl. Expression of Concern + PubPeer context), filter, and
-  reviewer-decision buttons that persist to **browser `localStorage` only**.
+  evidence (incl. Expression of Concern + PubPeer context), filter, pagination
+  with a directly-editable page number, and reviewer-decision buttons that
+  persist to **browser `localStorage` only**.
 - **Next increment:** a FastAPI + HTMX backend for durable, shared reviewer
   decisions — which also closes the Tier-B training-data loop (verdicts →
   labels). The evidence-rendering logic in `build_review_page.py` is the
   reusable part.
+
+## Pipeline ops dashboard (`pipeline_app.py`) — first draft, built 2026-07-21
+
+A second, separate FastAPI+HTMX app — not the reviewer-decision backend above,
+but plan.md's "Increment 2": a browser dashboard to trigger part or all of the
+pipeline, so a stage never again gets silently skipped the way `expand_targets.py`
+and the whole Phase-4 sensor layer both did earlier in this project (see
+plan.md Phase 5 and `BUG.md` #11).
+
+```bash
+source .venv/bin/activate
+uvicorn review.pipeline_app:app --reload --port 8800
+# then open http://127.0.0.1:8800/
+```
+
+Every pipeline stage (the identity/expansion chain, all 7 Phase-4 sensors,
+scoring/GDS, and the reproducibility snapshot scripts) is a real button that
+runs the exact script you'd run from the CLI as a background subprocess, with
+live polling (HTMX, `hx-trigger="every 2s"` while running) and a captured
+output log per stage. "Run this section" and "Run FULL pipeline" run a whole
+category/the whole non-optional pipeline in order, stopping on first failure.
+`reference_integrity_checker.py` (~2hrs, unscored) and the snapshot scripts
+stay manual, single-stage opt-ins, matching plan.md's own routine-rollout
+exclusions.
+
+**First-draft limits (see the module docstring for the full list):** a fixed,
+hardcoded stage registry (no arbitrary commands — no injection surface), plain
+background threads (not a real task queue — fine for one local operator, not
+concurrent multi-user use), and ordering is *shown*, not *enforced* — a
+genuinely destructive stage (`build_instances.py` on a graph that already has
+expansion data) gets an `hx-confirm` prompt, but nothing hard-blocks running
+stages out of order.
+
+Private, localhost-only tool — same audience as `index.html`, never meant to
+be exposed beyond the operator's own machine.

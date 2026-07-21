@@ -1,0 +1,11 @@
+<div id="batch-status"
+     {% if batch.running %}hx-get="/batch-status" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+  {% if batch.running %}
+  <div class="banner banner-running">
+    ⏳ Running {{ batch.index }} of {{ batch.total }}: <strong>{{ batch.current }}</strong>
+    <span class="muted">— page keeps polling; stage rows below update as each one finishes.</span>
+  </div>
+  {% elif batch.stopped_reason %}
+  <div class="banner banner-fail">✗ Batch stopped early: {{ batch.stopped_reason }}</div>
+  {% endif %}
+</div>

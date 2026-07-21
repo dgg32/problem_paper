@@ -1,0 +1,28 @@
+<tr id="stage-{{ stage.id }}"
+    {% if state.status == "running" %}hx-get="/status/{{ stage.id }}" hx-trigger="every 2s" hx-swap="outerHTML"{% endif %}>
+  <td class="s-label">
+    {{ stage.label }}
+    {% if stage.optional %}<span class="tag tag-optional">manual / opt-in</span>{% endif %}
+  </td>
+  <td>
+    {% if state.status == "idle" %}<span class="badge badge-idle">never run</span>
+    {% elif state.status == "running" %}<span class="badge badge-running">⏳ running…</span>
+    {% elif state.status == "done" %}<span class="badge badge-ok">✓ done{% if state.duration_s %} ({{ state.duration_s }}s){% endif %}</span>
+    {% elif state.status == "failed" %}<span class="badge badge-fail">✗ failed (exit {{ state.exit_code }})</span>
+    {% endif %}
+  </td>
+  <td class="muted s-time">{{ state.finished_at or state.started_at or "—" }}</td>
+  <td class="muted s-note">{{ stage.note }}</td>
+  <td class="s-action">
+    <button
+      hx-post="/run/{{ stage.id }}"
+      hx-target="closest tr"
+      hx-swap="outerHTML"
+      {% if stage.dangerous %}hx-confirm="{{ stage.note }} Continue?"{% endif %}
+      {% if state.status == "running" or batch.running %}disabled{% endif %}
+    >Run</button>
+    {% if state.output %}
+    <details class="s-output"><summary>output ({{ state.output|length }} line{{ 's' if state.output|length != 1 else '' }})</summary><pre>{{ state.output|join('\n') }}</pre></details>
+    {% endif %}
+  </td>
+</tr>
