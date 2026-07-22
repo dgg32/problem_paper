@@ -25,11 +25,6 @@ review"; a standing banner states the facts-not-verdicts framing; the
 coauthor-misconduct block carries the "same person ≠ same responsibility"
 caveat verbatim in spirit. No cell asserts fraud.
 
-Reviewer-decision buttons persist to the browser's localStorage only -- this
-is a read-first preview; durable, shared decisions need the FastAPI backend
-(the next Phase-5 increment). The buttons are clearly labelled as local-only
-so a reviewer isn't misled into thinking a click is saved server-side.
-
 Usage:
   python graph_processing/build_review_page.py [--top 50]
 """
@@ -64,14 +59,29 @@ TAG_LABELS = [
     ("cites-retracted-ext", "Cites retracted (ext.)"),
     ("self-cite", "Cites own retracted"),
     ("journal", "Journal integrity"),
+    ("author-retr", "Main authors of retracted works"),
+    ("journal-high-retr", "High retract rate journal"),
+    ("publisher-high-retr", "High retract rate publisher"),
+    ("journal-hijack", "Journal hijacking target"),
+    ("known-miller", "Known miller co-author"),
     ("ai", "AI-text tells"),
     ("pval", "p-value pattern"),
     ("erratum", "Erratum"),
     ("pubpeer", "PubPeer"),
+    ("pubpeer-allegation", "PubPeer allegation"),
     ("suppl", "Suppl data"),
     ("paperconan", "paperconan"),
     ("image", "Image screen"),
 ]
+
+# ">=" threshold for the "High retract rate journal/publisher" chips below.
+# journal_retr_rate_external / publisher_retr_rate are real-world rates on a
+# ~0.01%-1%-typical scale (see journal_retraction_rate_external.py /
+# publisher_retraction_rate.py) -- 5% sits clearly above that normal range,
+# catching only the genuinely elevated, often well-documented cases (e.g.
+# Hindawi's 2023-2024 mass-retraction event at 8.4%) without also flagging
+# the long tail of ordinary low-single-digit-percent venues.
+HIGH_EXTERNAL_RATE_THRESHOLD = 0.05
 
 # 🚩 priority gauge: map the continuous weighted score to 1-5 review-priority
 # flags for at-a-glance triage. Thresholds are fixed + documented (shown in the
@@ -91,7 +101,7 @@ def flag_gauge(sc: float) -> int:
 # Single source of truth — imported, not copied, so the two can never drift
 # (was three hand-synced copies; see #7 in BUG.md). tier_a_scoring only touches
 # the DB inside main(), so importing the module is side-effect-free.
-from tier_a_scoring import WEIGHTS, load_paperconan_runs  # noqa: E402
+from tier_a_scoring import WEIGHTS, load_paperconan_runs, capped_contribution, CAPPED_KEYS  # noqa: E402
 
 # Same broad misconduct-signal set as flag_evidence_report.py / gds.
 MISCONDUCT_REASONS = [
@@ -119,10 +129,30 @@ RETURN p.doi AS doi, p.title AS title, j.name AS journal,
        p.ori_finding_doc_url AS ori_doc_url, p.ori_respondent_name AS ori_respondent,
        p.ori_finding_date AS ori_date,
        coalesce(p.coauthor_other_misconduct, 0) AS coauthor_misconduct,
-       coalesce(p.journal_retr_rate, 0.0) AS journal_retr_rate,
        coalesce(p.institution_retr_rate, 0.0) AS institution_retr_rate,
        p.institution_retr_rate_name AS institution_retr_rate_name,
        p.institution_retr_rate_n AS institution_retr_rate_n,
+       p.institution_global_retraction_count AS institution_global_retraction_count,
+       p.institution_global_retraction_count_name AS institution_global_retraction_count_name,
+       coalesce(p.journal_hijack_flag, false) AS journal_hijack_flag,
+       p.journal_hijack_original_url AS journal_hijack_original_url,
+       p.journal_hijack_hijacked_url AS journal_hijack_hijacked_url,
+       coalesce(p.known_miller_coauthor, false) AS known_miller_coauthor,
+       p.known_miller_coauthor_name AS known_miller_coauthor_name,
+       p.known_miller_source_url AS known_miller_source_url,
+       coalesce(p.publisher_retr_rate, 0.0) AS publisher_retr_rate,
+       p.publisher_retr_rate_name AS publisher_retr_rate_name,
+       p.publisher_retr_rate_n AS publisher_retr_rate_n,
+       coalesce(p.country_retr_rate, 0.0) AS country_retr_rate,
+       p.country_retr_rate_name AS country_retr_rate_name,
+       p.country_retr_rate_n AS country_retr_rate_n,
+       coalesce(p.journal_retr_rate_external, 0.0) AS journal_retr_rate_external,
+       p.journal_retr_rate_external_n AS journal_retr_rate_external_n,
+       coalesce(p.author_retr_rate_external, 0.0) AS author_retr_rate_external,
+       p.author_retr_rate_external_name AS author_retr_rate_external_name,
+       p.author_retr_rate_external_position AS author_retr_rate_external_position,
+       coalesce(p.author_retr_rate_external_n, 0) AS author_retr_rate_external_n,
+       p.author_retr_rate_external_total AS author_retr_rate_external_total,
        coalesce(p.crossref_correction_count, 0) AS correction_count,
        p.crossref_correction_dois AS correction_dois,
        p.gds_misconduct_prob AS gds_prob,
@@ -165,8 +195,11 @@ def score(r: dict) -> float:
         + r["erratum_flag"] * WEIGHTS["pubmed_erratum_flag"]
         + r["ori_flag"] * WEIGHTS["ori_finding_flag"]
         + r["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"]
-        + r["journal_retr_rate"] * WEIGHTS["journal_retr_rate"]
         + r["institution_retr_rate"] * WEIGHTS["institution_retr_rate"]
+        + capped_contribution("publisher_retr_rate", r["publisher_retr_rate"])
+        + capped_contribution("country_retr_rate", r["country_retr_rate"])
+        + capped_contribution("journal_retr_rate_external", r["journal_retr_rate_external"])
+        + capped_contribution("author_retr_rate_external", r["author_retr_rate_external"])
         + r["correction_count"] * WEIGHTS["crossref_correction_flag_count"]
         + (WEIGHTS["paperconan_needs_human"] if adj == "needs_human" else 0.0)
         + (WEIGHTS["paperconan_confirmed"] if adj == "confirmed" else 0.0)
@@ -198,6 +231,23 @@ def load_pubpeer_categories() -> dict:
         out.setdefault(rec["paper_doi"], {}).setdefault(rec["category"], 0)
         out[rec["paper_doi"]][rec["category"]] += 1
     return out
+
+
+# Categories from categorize_pubpeer_comments.py that are an actual claim
+# ABOUT the paper, not just administrative/procedural chatter -- used for the
+# "PubPeer allegation" chip below, a stricter filter than the plain "PubPeer"
+# chip (any comment at all, including a methodology question or the author's
+# own rebuttal). Deliberately excludes "methodology_question" (a clarification
+# request, not a concern) and "author_response"/"uncategorized" (no claim, or
+# no rule matched at all) -- see that module's docstring for the full
+# category definitions. Still a comment's NATURE, never a verdict (plan.md §0).
+PUBPEER_ALLEGATION_CATEGORIES = {
+    "official_editorial_action",
+    "external_investigation_reference",
+    "conflict_of_interest",
+    "reference_integrity",
+    "image_integrity",
+}
 
 
 # load_paperconan_runs() now lives in tier_a_scoring.py (imported above) --
@@ -258,10 +308,30 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
     """Build the expandable per-paper evidence HTML."""
     parts: list[str] = []
 
-    def row(label, contrib, body):
+    def row(label, contrib, body, help=None):
+        # publisher_retr_rate/country_retr_rate are real-world-scale rates
+        # (typically 0.0001-0.08, see config/weights.yaml) -- at 2 decimals
+        # their contribution rounds to "+0.00", which reads as "no score"
+        # even though it's a genuine nonzero contributor. Show more decimals
+        # whenever 2 would hide a real nonzero value.
+        contrib_str = f"+{contrib:.2f}" if contrib == 0 or contrib >= 0.005 else f"+{contrib:.4f}"
+        # Optional `help`: supplementary context, not part of the always-
+        # visible evidence -- rendered as a small "!" next to the TITLE with
+        # a floating popover, pure-CSS hover/focus (no JS, no layout shift --
+        # 2026-07-23, user feedback: expand-in-place read as an "expander,"
+        # not a help bubble, and pushed the rest of the card down). Neutral
+        # accent color, not warn-colored -- it's info, not an alert.
+        help_html = ""
+        if help:
+            help_html = (
+                '<span class="help-wrap">'
+                '<button class="help-btn" type="button" aria-label="More context">!</button>'
+                f'<span class="help-pop">{help}</span>'
+                "</span>"
+            )
         return (
-            f'<div class="ev"><div class="ev-h"><span class="ev-t">{esc(label)}</span>'
-            f'<span class="ev-c">+{contrib:.2f}</span></div>'
+            f'<div class="ev"><div class="ev-h"><span class="ev-tg"><span class="ev-t">{esc(label)}</span>{help_html}</span>'
+            f'<span class="ev-c">{contrib_str}</span></div>'
             f'<div class="ev-b">{body}</div></div>'
         )
 
@@ -294,10 +364,10 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
         parts.append(row(
             f'Co-author of misconduct work ({r["coauthor_misconduct"]} co-author(s))',
             r["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"],
-            '<p class="caveat">⚠ Same person ≠ same responsibility (§0). This means a co-author shares a cluster with '
-            'someone who wrote a paper retracted for a misconduct-signal reason — <em>not</em> a formal finding about '
-            'this paper or this person. Author role varies paper to paper.</p>'
             f'<ul>{names}</ul>',
+            help='Same person ≠ same responsibility (§0). This means a co-author shares a cluster with '
+                 'someone who wrote a paper retracted for a misconduct-signal reason — not a formal finding about '
+                 'this paper or this person. Author role varies paper to paper.',
         ))
 
     if r["ret_count"] > 0:
@@ -308,10 +378,7 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             self_note = ""
             if f.get("self_citation"):
                 authors = ", ".join(f.get("self_citation_authors", [])[:3])
-                self_note = (
-                    f' <span class="self-cite">👤 own retracted work'
-                    + (f' — {esc(authors)}' if authors else "") + '</span>'
-                )
+                self_note = f' <span class="self-cite">👤 {esc(authors) if authors else "self-citation"}</span>'
             return (
                 f'<li>📃 <a href="https://doi.org/{esc(f.get("cited_retracted_paper_doi"))}" target="_blank" rel="noopener">'
                 f'{esc((f.get("cited_retracted_paper_title") or "")[:80])}</a> '
@@ -325,18 +392,18 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
         if len(flags) > 4:
             items += f'<li class="muted">…and {len(flags) - 4} more</li>'
         n_self = sum(1 for f in flags if f.get("self_citation"))
-        caveat = ""
+        self_help = None
         if n_self:
-            caveat = (
-                f'<p class="caveat self-cite-caveat">👤 <strong>{n_self} self-citation(s):</strong> '
-                'the citing paper shares an author (same probable-person cluster) with the retracted '
-                'work it cites — the authors are citing their own now-retracted results, a materially '
-                'stronger integrity signal than citing a stranger\'s.</p>'
+            self_help = (
+                f'{n_self} self-citation(s): the citing paper shares an author (same probable-person cluster) '
+                'with the retracted work it cites — the authors are citing their own now-retracted results, a '
+                "materially stronger integrity signal than citing a stranger's."
             )
         parts.append(row(
-            f'Cites retracted work ({r["ret_count"]})',
+            f'♺ Cites retracted work ({r["ret_count"]})',
             r["ret_count"] * WEIGHTS["retracted_citation_flag_count"],
-            f'{caveat}<ul>{items}</ul>',
+            f'<ul>{items}</ul>',
+            help=self_help,
         ))
 
     if r["ext_ret_count"] > 0:
@@ -349,26 +416,101 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
         if len(ext_flags) > 4:
             items += f'<li class="muted">…and {len(ext_flags) - 4} more</li>'
         parts.append(row(
-            f'Cites retracted work — external ({r["ext_ret_count"]})',
+            f'♺ Cites retracted work — external ({r["ext_ret_count"]})',
             r["ext_ret_count"] * WEIGHTS["external_retracted_citation_flag_count"],
-            '<p class="caveat">Retracted per OpenAlex, but outside our own Retraction-Watch-seeded '
-            'corpus — no reason/date/self-citation context available, confirmed retraction status only.</p>'
             f'<ul>{items}</ul>',
+            help='Retracted per OpenAlex, but outside our own Retraction-Watch-seeded '
+                 'corpus — no reason/date/self-citation context available, confirmed retraction status only.',
         ))
 
-    if r["journal_retr_rate"] > 0:
+    # Journal/publisher-level signals grouped together. The graph-internal
+    # `journal_retr_rate` (removed 2026-07-22, plan.md) used to sit here too,
+    # but it and journal_integrity_flag_count's check 3 measured the SAME
+    # underlying fact (this journal's retraction rate in our own seeded
+    # graph) two different ways -- one continuous, one a >10% threshold --
+    # so a paper could be scored twice for one real cause. Kept only the
+    # flag (journal_integrity_flag_count); journal_retr_rate_external below
+    # is the real, non-redundant replacement (a different, external-scale fact).
+    if r["journal_count"] > 0:
+        flags = json.loads(r["journal_flags"] or "[]")
+        reason = flags[0].get("reason") if flags else "flagged"
         parts.append(row(
-            "Journal retraction rate",
-            r["journal_retr_rate"] * WEIGHTS["journal_retr_rate"],
-            f'{esc(r["journal"])} has a measured {r["journal_retr_rate"]:.1%} retraction rate in this graph.',
+            "📔 Journal integrity flag",
+            r["journal_count"] * WEIGHTS["journal_integrity_flag_count"],
+            f'<p>The specific reason for THIS paper: {esc(reason)}</p>',
+            help="This flag fires for any ONE of three different checks -- an OA-only "
+                 "publisher's journal missing from DOAJ, explicit delisting from Scopus/Web of Science, or "
+                 "this journal crossing a >10% retraction-rate threshold measured in OUR OWN graph (the same "
+                 "underlying fact as the removed \"Journal retraction rate\" row, just thresholded instead of "
+                 "continuous) -- so the same +1.00 score can mean quite different things paper to paper.",
+        ))
+
+    def capped_note(key: str, rate: float) -> str | None:
+        """None if this row's contribution isn't capped, else a note for the
+        help popover explaining that it hit its ceiling -- see plan.md's
+        2026-07-22 caps update (capped_contribution() in tier_a_scoring.py):
+        these signals are heavy-tailed enough that an uncapped linear weight
+        let a single infamous venue/repeat-offender author outrank direct
+        per-paper evidence on its own."""
+        contrib = capped_contribution(key, rate)
+        raw = rate * WEIGHTS[key]
+        if contrib < raw:
+            cap = WEIGHTS[CAPPED_KEYS[key]]
+            return f'Contribution capped at {cap} -- see plan.md\'s 2026-07-22 caps update for why.'
+        return None
+
+    if r["journal_retr_rate_external"] > 0:
+        parts.append(row(
+            "📔 Journal retraction rate (external)",
+            capped_contribution("journal_retr_rate_external", r["journal_retr_rate_external"]),
+            f'{esc(r["journal"])} has a real-world {r["journal_retr_rate_external"]:.3%} retraction rate '
+            f'(Retraction Watch / Crossref Journals API, n={r["journal_retr_rate_external_n"]}).',
+            help=capped_note("journal_retr_rate_external", r["journal_retr_rate_external"]),
+        ))
+
+    if r["publisher_retr_rate"] > 0:
+        parts.append(row(
+            "📇 Publisher retraction rate (external)",
+            capped_contribution("publisher_retr_rate", r["publisher_retr_rate"]),
+            f'{esc(r["publisher_retr_rate_name"])} has a real-world {r["publisher_retr_rate"]:.3%} retraction rate '
+            f'(Retraction Watch / Crossref, n={r["publisher_retr_rate_n"]}).',
+            help=capped_note("publisher_retr_rate", r["publisher_retr_rate"]),
         ))
 
     if r["institution_retr_rate"] > 0:
         parts.append(row(
-            "Institution retraction rate",
+            "🏛️ Institution retraction rate",
             r["institution_retr_rate"] * WEIGHTS["institution_retr_rate"],
             f'{esc(r["institution_retr_rate_name"])} has a measured {r["institution_retr_rate"]:.1%} '
             f'retraction rate in this graph (n={r["institution_retr_rate_n"]} papers).',
+        ))
+
+    if r["country_retr_rate"] > 0:
+        parts.append(row(
+            "🏳️‍🌈 Country retraction rate (external)",
+            capped_contribution("country_retr_rate", r["country_retr_rate"]),
+            f'{esc(r["country_retr_rate_name"])} has a real-world {r["country_retr_rate"]:.3%} retraction rate '
+            f'(Retraction Watch / OpenAlex, n={r["country_retr_rate_n"]}).',
+            help=capped_note("country_retr_rate", r["country_retr_rate"]),
+        ))
+
+    if r["author_retr_rate_external_n"] > 0:
+        author_help = (
+            'Retracted per Retraction Watch, matched by DOI against this specific person\'s own ORCID '
+            'record -- no name-matching involved. Restricted to first/last authors only (the ones '
+            'conventionally responsible for the work). Still ecological, not direct (§0): this is their '
+            'track record across ALL their claimed work, not a finding about this paper specifically.'
+        )
+        author_cap_note = capped_note("author_retr_rate_external", r["author_retr_rate_external"])
+        if author_cap_note:
+            author_help += " " + author_cap_note
+        parts.append(row(
+            f'👤 Author retraction rate — {esc(r["author_retr_rate_external_position"])} author (external)',
+            capped_contribution("author_retr_rate_external", r["author_retr_rate_external"]),
+            f'{r["author_retr_rate_external_n"]} out of {esc(r["author_retr_rate_external_name"])}\'s '
+            f'{r["author_retr_rate_external_total"]} ORCID-claimed works were retracted '
+            f'({r["author_retr_rate_external"]:.1%}).',
+            help=author_help,
         ))
 
     if r["correction_count"] > 0:
@@ -382,14 +524,6 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             r["correction_count"] * WEIGHTS["crossref_correction_flag_count"],
             '<p class="caveat">Corrections are often benign (typo/affiliation fixes) -- kept low-weight.</p>'
             f'<ul>{items}</ul>',
-        ))
-
-    if r["journal_count"] > 0:
-        flags = json.loads(r["journal_flags"] or "[]")
-        parts.append(row(
-            "Journal integrity flag",
-            r["journal_count"] * WEIGHTS["journal_integrity_flag_count"],
-            esc(flags[0].get("reason") if flags else "flagged"),
         ))
 
     if r["ai_count"] > 0:
@@ -436,13 +570,46 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
         ctx.append(
             f'<div class="ctx"><span class="ctx-t">PubPeer</span> '
             f'<a href="{esc(url)}" target="_blank" rel="noopener">{r["pubpeer_total"]} comment(s)</a>{ar}<br>'
-            f'<span class="muted">concern comments by nature — {esc(cat_str)}. '
+            f'<span class="muted">categorized by comment type — {esc(cat_str)}. '
             'Community attention, NOT a guilt signal, and not part of the score.</span></div>'
         )
     if r["gds_prob"] is not None:
         ctx.append(
             f'<div class="ctx"><span class="ctx-t">GDS prior</span> {r["gds_prob"]:.3f} '
             '<span class="muted">— weak/capped/domain-shifted learned prior, labelled only, never scored.</span></div>'
+        )
+    if r["institution_global_retraction_count"]:
+        ctx.append(
+            f'<div class="ctx"><span class="ctx-t">Institution — global retraction count</span> '
+            f'{esc(r["institution_global_retraction_count_name"])}: '
+            f'{r["institution_global_retraction_count"]} <span class="muted">'
+            '(exact-match count against the FULL Retraction Watch csv, all subjects. '
+            'A raw count, not a rate; coverage is deliberately partial (exact-string match only, no fuzzy '
+            'matching at institution scale) — see institution_retraction_rate.py. Context only, never scored.)</span></div>'
+        )
+    if r["journal_hijack_flag"]:
+        orig_url = r["journal_hijack_original_url"]
+        orig_link = (
+            f'<a href="{esc(orig_url)}" target="_blank" rel="noopener">{esc(orig_url)}</a>' if orig_url else "unknown"
+        )
+        ctx.append(
+            f'<div class="ctx"><span class="ctx-t">⚠ Journal hijacking target</span> '
+            f'<span class="muted">{esc(r["journal"])}\'s name/ISSN is documented in the Retraction Watch / '
+            'Anna Abalkina Hijacked Journal Checker — a scam site clones it to solicit fraudulent '
+            f'"publications". Real site: {orig_link} &middot; clone site: '
+            f'<a href="{esc(r["journal_hijack_hijacked_url"])}" target="_blank" rel="noopener">'
+            f'{esc(r["journal_hijack_hijacked_url"])}</a>. '
+            'This does NOT mean this specific paper came from the clone — verify which site it actually '
+            'appeared on. Context only, never scored.</span></div>'
+        )
+    if r["known_miller_coauthor"]:
+        ctx.append(
+            f'<div class="ctx"><span class="ctx-t">⚠️ Known miller co-author</span> '
+            f'<a href="{esc(r["known_miller_source_url"])}" target="_blank" rel="noopener">'
+            f'👤 {esc(r["known_miller_coauthor_name"])}</a><br>'
+            '<span class="muted">named in investigative reporting as a paper-mill participant. '
+            'Guilt by co-authorship with a documented bad actor is associative, not a finding about '
+            'this paper\'s own conduct (§0). Context only, never scored.</span></div>'
         )
     suppl = r["pmc_suppl_status"]
     if suppl and suppl != "unchecked":
@@ -460,15 +627,22 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
 
     if pc:
         f = pc.get("findings") or {}
+        # run_paperconan.py writes a literal "TODO -- adjudicate..." placeholder
+        # into conclusion until a human edits meta.yaml -- that's an instruction
+        # for whoever runs the pipeline, not something a review-page reader can
+        # act on, so treat it as unset here rather than showing it verbatim.
+        conclusion = pc.get("conclusion") or ""
+        if conclusion.startswith("TODO"):
+            conclusion = ""
         if pc.get("outcome"):
             # Non-scan outcome (no data / figures-only): show the recorded reason,
             # never a findings count (there was no numeric scan).
-            detail = f'{esc(pc.get("conclusion") or "not scanned")} '
+            detail = f'{esc(conclusion) or "not scanned"} '
         else:
             counts = f'{f.get("high", 0)} high &middot; {f.get("medium", 0)} medium &middot; {f.get("low", 0)} low'
             draft = ' <strong>(draft — not yet adjudicated)</strong>' if pc.get("needs_adjudication") else ""
             top = f'Top signal: {esc(pc["top_finding"])}. ' if pc.get("top_finding") else ""
-            detail = f'{counts}.{draft} {esc(pc.get("conclusion") or "")}. {top}'
+            detail = f'{counts}.{draft} {esc(conclusion)}. {top}' if conclusion else f'{counts}.{draft} {top}'
         scored_note = (
             "The needs_human/confirmed verdict above is scored; the raw detector counts here are not. "
             if pc_adj in ("needs_human", "confirmed") else
@@ -536,6 +710,16 @@ def main() -> None:
                 badges.append(f'<span class="badge badge-flag" title="Retracted per OpenAlex, outside our Retraction-Watch corpus">Cites retracted (ext.) ({r["ext_ret_count"]})</span>'); tags.append("cites-retracted-ext")
             if r["journal_count"] > 0:
                 badges.append('<span class="badge badge-flag">Journal integrity flag</span>'); tags.append("journal")
+            if r["author_retr_rate_external_n"] > 0:
+                badges.append(f'<span class="badge badge-flag">👤 Main authors of retracted works ({r["author_retr_rate_external_n"]})</span>'); tags.append("author-retr")
+            if r["journal_retr_rate_external"] >= HIGH_EXTERNAL_RATE_THRESHOLD:
+                badges.append(f'<span class="badge badge-flag" title="{r["journal_retr_rate_external"]:.1%} real-world retraction rate">📔 High retract rate journal</span>'); tags.append("journal-high-retr")
+            if r["publisher_retr_rate"] >= HIGH_EXTERNAL_RATE_THRESHOLD:
+                badges.append(f'<span class="badge badge-flag" title="{r["publisher_retr_rate"]:.1%} real-world retraction rate">📇 High retract rate publisher</span>'); tags.append("publisher-high-retr")
+            if r["journal_hijack_flag"]:
+                badges.append('<span class="badge badge-flag" title="This journal name/ISSN is a documented hijacking target -- see review context below">⚠ Journal hijacking target</span>'); tags.append("journal-hijack")
+            if r["known_miller_coauthor"]:
+                badges.append(f'<span class="badge badge-flag" title="Co-authored with {esc(r["known_miller_coauthor_name"])}, named in investigative reporting as a paper-mill participant">⚠️ Known miller co-author</span>'); tags.append("known-miller")
             if r["ai_count"] > 0:
                 badges.append(f'<span class="badge badge-flag">AI-text tells ({r["ai_count"]})</span>'); tags.append("ai")
             if r["pval_count"] > 0:
@@ -544,6 +728,9 @@ def main() -> None:
                 badges.append('<span class="badge badge-flag">Erratum on record</span>'); tags.append("erratum")
             if r["pubpeer_total"] > 0:
                 badges.append(f'<span class="badge badge-pp">{r["pubpeer_total"]} PubPeer</span>'); tags.append("pubpeer")
+                allegation_cats = [c for c in pp_cats.get(r["doi"], {}) if c in PUBPEER_ALLEGATION_CATEGORIES]
+                if allegation_cats:
+                    badges.append('<span class="badge badge-pp" title="At least one PubPeer comment makes a substantive claim (image/reference/COI/investigation), not just a methodology question or the author\'s own reply">⚠ PubPeer allegation</span>'); tags.append("pubpeer-allegation")
             if r["has_pmc_suppl"] and r["pmc_suppl_url"]:
                 badges.append(
                     f'<a class="badge badge-suppl" href="{esc(r["pmc_suppl_url"])}" target="_blank" '
@@ -554,6 +741,12 @@ def main() -> None:
                 badges.append(paperconan_badge(pc_runs[r["doi"]])); tags.append("paperconan")
                 if pc_runs[r["doi"]].get("image_screen"):
                     badges.append(image_badge(pc_runs[r["doi"]]["image_screen"])); tags.append("image")
+            if r["country_retr_rate"] > 0:
+                # Not a chip (an open-ended set of ISO2 codes would clutter the
+                # fixed TAG_LABELS chip row) -- filterable instead via the
+                # dedicated country <select> built from country_counts below,
+                # using the exact same data-tags/activeTags mechanism as chips.
+                tags.append(f"country-{r['country_retr_rate_name'].lower()}")
             for t in tags:
                 tag_counts[t] = tag_counts.get(t, 0) + 1
             cards.append(f'''
@@ -574,12 +767,6 @@ def main() -> None:
       </div>
       <div class="card-b">
         {render_evidence(r, coauthors, pp_cats, pc_runs)}
-        <div class="decision" data-doi="{esc(r['doi'])}">
-          <span class="dlabel">Reviewer decision <span class="muted">(saved to this browser only — preview)</span>:</span>
-          <button data-v="legit">Legit</button>
-          <button data-v="look">Needs deeper look</button>
-          <button data-v="problem">Confirmed problematic</button>
-        </div>
       </div>
     </article>''')
     driver.close()
@@ -593,9 +780,17 @@ def main() -> None:
         f'<span class="chip-n">{tag_counts[k]}</span></button>'
         for k, label in TAG_LABELS if tag_counts.get(k)
     )
+    country_tags = sorted(
+        (k for k in tag_counts if k.startswith("country-")),
+        key=lambda k: k[len("country-"):],
+    )
+    country_options = "".join(
+        f'<option value="{k}">{esc(k[len("country-"):].upper())} ({tag_counts[k]})</option>'
+        for k in country_tags
+    )
     page = PAGE_TEMPLATE.format(
         n=len(ranked), n_eoc=n_eoc, n_pp=n_pp, generated=generated,
-        cards="".join(cards), chips=chips,
+        cards="".join(cards), chips=chips, country_options=country_options,
     )
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_text(page)
@@ -610,10 +805,10 @@ PAGE_TEMPLATE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Papers flagged for human review</title>
 <style>
-  :root {{ --bg:#fff; --fg:#1a1a1a; --muted:#666; --line:#e3e3e6; --card:#fafafa;
+  :root {{ --bg:#fff; --fg:#1a1a1a; --muted:#666; --line:#e3e3e6; --card:#fafafa; --card-detail:#fff;
            --accent:#7a5cff; --eoc:#c2410c; --pp:#0369a1; --warn:#92400e; --warnbg:#fef3c7; }}
   @media (prefers-color-scheme: dark) {{
-    :root {{ --bg:#16161a; --fg:#e8e8ea; --muted:#9a9aa2; --line:#2c2c33; --card:#1d1d22;
+    :root {{ --bg:#16161a; --fg:#e8e8ea; --muted:#9a9aa2; --line:#2c2c33; --card:#1d1d22; --card-detail:#28282f;
              --accent:#9d86ff; --eoc:#fb923c; --pp:#38bdf8; --warn:#fcd34d; --warnbg:#3a2f10; }}
   }}
   * {{ box-sizing:border-box; }}
@@ -631,8 +826,10 @@ PAGE_TEMPLATE = """<!doctype html>
   .search-ico {{ position:absolute; left:13px; font-size:.9rem; opacity:.6; pointer-events:none; }}
   .toolbar input {{ flex:1; padding:9px 12px 9px 38px; border:1px solid var(--line); border-radius:22px; background:var(--bg); color:var(--fg); }}
   .toolbar input:focus {{ outline:none; border-color:var(--accent); }}
+  .toolbar select {{ padding:9px 12px; border:1px solid var(--line); border-radius:22px; background:var(--bg); color:var(--fg); font-size:.9rem; flex-shrink:0; }}
+  .toolbar select:focus {{ outline:none; border-color:var(--accent); }}
   main {{ max-width:960px; margin:0 auto; padding:10px 20px 60px; }}
-  .card {{ border:1px solid var(--line); border-radius:11px; margin:10px 0; background:var(--card); overflow:hidden; }}
+  .card {{ border:1px solid var(--line); border-radius:11px; margin:10px 0; background:var(--card); }}
   .card-h {{ display:grid; grid-template-columns:auto auto 1fr auto; gap:14px; align-items:center; padding:13px 16px; cursor:pointer; }}
   .rank {{ color:var(--muted); font-variant-numeric:tabular-nums; font-size:.85rem; }}
   .score {{ text-align:center; min-width:5.2ch; }}
@@ -656,10 +853,12 @@ PAGE_TEMPLATE = """<!doctype html>
   .ctx code {{ font-size:.82em; background:color-mix(in srgb,var(--fg) 8%,transparent); padding:1px 5px; border-radius:4px; }}
   .chev {{ color:var(--muted); transition:transform .15s; }}
   .card.open .chev {{ transform:rotate(180deg); }}
-  .card-b {{ display:none; padding:4px 16px 16px; border-top:1px solid var(--line); }}
+  .card-b {{ display:none; padding:4px 16px 16px; border-top:1px solid var(--line); background:var(--card-detail);
+    border-radius:0 0 10px 10px; }}
   .card.open .card-b {{ display:block; }}
   .ev {{ margin:12px 0; }}
   .ev-h {{ display:flex; justify-content:space-between; align-items:baseline; gap:10px; }}
+  .ev-tg {{ display:inline-flex; align-items:center; gap:5px; }}
   .ev-t {{ font-weight:600; font-size:.92rem; }}
   .ev-c {{ color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums; font-size:.85rem; }}
   .ev-b {{ font-size:.88rem; color:var(--fg); margin-top:4px; }}
@@ -668,6 +867,19 @@ PAGE_TEMPLATE = """<!doctype html>
   .ev-b a {{ color:var(--pp); }}
   .muted {{ color:var(--muted); }}
   .caveat {{ background:var(--warnbg); color:var(--warn); border-radius:7px; padding:7px 10px; font-size:.85rem; margin:4px 0 7px; }}
+  .help-wrap {{ position:relative; display:inline-flex; align-items:center; }}
+  .help-btn {{ display:inline-flex; align-items:center; justify-content:center; flex-shrink:0;
+    width:16px; height:16px; border-radius:50%; border:none; background:var(--accent); color:var(--bg);
+    font-weight:700; font-size:.72rem; line-height:1; cursor:pointer; padding:0; }}
+  .help-btn:hover {{ filter:brightness(1.15); }}
+  .help-pop {{ position:absolute; top:22px; left:0; z-index:20; width:260px; max-width:min(260px, 60vw);
+    background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:8px;
+    padding:9px 11px; font-size:.82rem; font-weight:400; line-height:1.45;
+    box-shadow:0 6px 20px rgba(0,0,0,.18);
+    opacity:0; visibility:hidden; transform:translateY(-4px); pointer-events:none;
+    transition:opacity .12s ease, transform .12s ease; }}
+  .help-wrap:hover .help-pop, .help-wrap:focus-within .help-pop {{
+    opacity:1; visibility:visible; transform:translateY(0); pointer-events:auto; }}
   .self-cite-caveat {{ background:color-mix(in srgb,#dc2626 12%,transparent); color:#dc2626; }}
   .self-cite {{ color:#dc2626; font-weight:600; }}
   .ctx-wrap {{ margin-top:16px; border-top:1px dashed var(--line); padding-top:10px; }}
@@ -675,11 +887,6 @@ PAGE_TEMPLATE = """<!doctype html>
   .ctx {{ font-size:.87rem; margin:6px 0; }}
   .ctx-t {{ font-weight:600; }}
   .ctx a {{ color:var(--pp); }}
-  .decision {{ margin-top:16px; padding-top:12px; border-top:1px solid var(--line); display:flex; gap:8px; align-items:center; flex-wrap:wrap; }}
-  .dlabel {{ font-size:.85rem; margin-right:4px; }}
-  .decision button {{ padding:5px 12px; border:1px solid var(--line); border-radius:7px; background:var(--bg); color:var(--fg); cursor:pointer; font-size:.85rem; }}
-  .decision button:hover {{ border-color:var(--accent); }}
-  .decision button.sel {{ background:var(--accent); color:#fff; border-color:var(--accent); }}
   .chips {{ max-width:960px; margin:8px auto 0; padding:0 20px; display:flex; gap:7px; flex-wrap:wrap; align-items:center; }}
   .chip {{ font-size:.82rem; padding:4px 11px; border:1px solid var(--line); border-radius:20px; background:var(--card); color:var(--fg); cursor:pointer; display:inline-flex; gap:6px; align-items:center; }}
   .chip:hover {{ border-color:var(--accent); }}
@@ -721,6 +928,10 @@ PAGE_TEMPLATE = """<!doctype html>
     <span class="search-ico" aria-hidden="true">🔎</span>
     <input id="filter" type="search" placeholder="Filter by title, DOI, or journal…" oninput="doFilter(this.value)">
   </div>
+  <select id="countrySelect" title="🏳️‍🌈 Filter by country retraction rate" onchange="setCountry(this.value)">
+    <option value="">🏳️‍🌈 All countries</option>
+    {country_options}
+  </select>
 </div>
 <div class="chips">{chips}</div>
 <div class="filterbar">
@@ -756,25 +967,6 @@ PAGE_TEMPLATE = """<!doctype html>
   <button id="nextBottom" onclick="gotoPage(page+1)">next →</button>
 </div>
 <script>
-  // Reviewer decisions: localStorage only (this browser). Clearly a preview until the backend lands.
-  const KEY = 'review-decisions-v1';
-  const store = JSON.parse(localStorage.getItem(KEY) || '{{}}');
-  function paint() {{
-    document.querySelectorAll('.decision').forEach(d => {{
-      const v = store[d.dataset.doi];
-      d.querySelectorAll('button').forEach(b => b.classList.toggle('sel', b.dataset.v === v));
-    }});
-  }}
-  document.querySelectorAll('.decision button').forEach(b => b.addEventListener('click', e => {{
-    e.stopPropagation();
-    const doi = b.closest('.decision').dataset.doi;
-    store[doi] = (store[doi] === b.dataset.v) ? undefined : b.dataset.v;
-    if (store[doi] === undefined) delete store[doi];
-    localStorage.setItem(KEY, JSON.stringify(store));
-    paint();
-  }}));
-  paint();
-
   // Combined filtering: free-text query AND the set of active tag chips.
   // Pagination applies to the FILTERED set, not the raw list -- "page 1 of
   // filtered results," matching how the toolbar's "shown X of Y" already works.
@@ -842,9 +1034,18 @@ PAGE_TEMPLATE = """<!doctype html>
     document.getElementById('clear').style.display = activeTags.size ? '' : 'none';
     applyFilters();
   }}
+  function setCountry(tag) {{
+    // Single-select (a paper has one max-country), unlike the chips above --
+    // drop any previously-selected country- tag before adding the new one.
+    [...activeTags].filter(t => t.startsWith('country-')).forEach(t => activeTags.delete(t));
+    if (tag) activeTags.add(tag);
+    document.getElementById('clear').style.display = activeTags.size ? '' : 'none';
+    applyFilters();
+  }}
   function clearTags() {{
     activeTags.clear();
     document.querySelectorAll('.chip.active').forEach(b => b.classList.remove('active'));
+    document.getElementById('countrySelect').value = '';
     document.getElementById('clear').style.display = 'none';
     applyFilters();
   }}

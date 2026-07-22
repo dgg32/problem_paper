@@ -1,4 +1,4 @@
-# Frozen from the working .venv (Python 3.11.15) on 2026-07-21 via:
+# Frozen from the working .venv (Python 3.11.15) on 2026-07-22 via:
 #   uv pip freeze --python .venv/bin/python3
 #
 # To recreate the environment on another machine:
@@ -9,8 +9,9 @@
 # paperconan (numeric-forensics CLI, see .claude/skills/paperconan) pulls in
 # most of the PDF/image/ML-adjacent packages below as its own dependencies --
 # fastapi/uvicorn/jinja2 (added 2026-07-21) are for review/pipeline_app.py, the
-# Phase-5 pipeline-execution dashboard -- this file is a full environment
-# snapshot, not a hand-picked list.
+# Phase-5 pipeline-execution dashboard; pycountry (added 2026-07-22) is for
+# graph_processing/country_retraction_rate.py's RW-country-name -> ISO2
+# resolution -- this file is a full environment snapshot, not a hand-picked list.
 annotated-doc==0.0.4
 annotated-types==0.7.0
 anyio==4.14.2
@@ -39,6 +40,7 @@ pdfminer-six==20260107
 pdfplumber==0.11.10
 pillow==12.3.0
 protobuf==7.35.1
+pycountry==26.2.16
 pycparser==3.0
 pydantic==2.13.4
 pydantic-core==2.46.4

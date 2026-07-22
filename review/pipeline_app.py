@@ -163,6 +163,22 @@ STAGES: list[Stage] = [
     Stage("refresh_correction_history", "refresh_correction_history.py", "scoring",
           [PYTHON, "graph_processing/refresh_correction_history.py"],
           "Crossref updates:{doi} reverse lookup for correction/errata notices. Rate-limited."),
+    Stage("publisher_retraction_rate", "publisher_retraction_rate.py", "scoring",
+          [PYTHON, "graph_processing/publisher_retraction_rate.py"],
+          "EXTERNAL publisher retraction rate: full Retraction Watch csv over a Crossref "
+          "Members API total-dois denominator, not scoped to our own graph. Rate-limited "
+          "(one Crossref call per distinct publisher)."),
+    Stage("country_retraction_rate", "country_retraction_rate.py", "scoring",
+          [PYTHON, "graph_processing/country_retraction_rate.py"],
+          "EXTERNAL country retraction rate: full Retraction Watch csv over an OpenAlex "
+          "per-country works-count denominator, not scoped to our own graph. Rate-limited "
+          "(one OpenAlex call per distinct country)."),
+    Stage("journal_retraction_rate_external", "journal_retraction_rate_external.py", "scoring",
+          [PYTHON, "graph_processing/journal_retraction_rate_external.py"],
+          "EXTERNAL journal retraction rate: full Retraction Watch csv over a Crossref "
+          "Journals API total-dois denominator, not scoped to our own graph. Complements "
+          "(does not replace) the graph-internal journal_retr_rate. Rate-limited "
+          "(one or two Crossref calls per distinct journal)."),
     Stage("gds_node_classification", "gds_node_classification.py", "scoring",
           [PYTHON, "graph_processing/gds_node_classification.py"],
           "GDS FastRP embeddings + train/predict misconduct-class probability. A few seconds."),

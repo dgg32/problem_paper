@@ -126,3 +126,100 @@ plan.md §0 scoring discipline).*
 2. **Corrections/errata‑history** (1–2 hrs, Crossref REST API batch, stored as `Paper.update_count`, `Paper.has_correction`). Low weight initially but high explainability.
 3. **Author output‑burst + topic‑drift** (3–4 hrs, shares OpenAlex per‑author fetch with hyperprolific — do as a pair). Both stay not‑scored.
 4. **Citing‑side reputation** (1–2 hrs, graph‑internal, pure Cypher). Not‑scored context alongside GDS prior.
+
+---
+
+## Retraction Watch as a data source (2026-07-22)
+
+*What the material on retractionwatch.com offers that can be turned into a sensor,
+a graph property, or a curated list this project can ingest — broken out by
+machine‑readable vs. reporting‑derived signal.*
+
+### Curated lists (machine‑readable, ready to ingest)
+
+Three maintained lists are directly consumable. None overlap with anything the
+graph currently imports, and all three carry DOIs, journal titles, or dates that
+make them matchable to existing `Paper`/`Journal` nodes.
+
+| Source | Format | Size | Hard fact? | Mapping |
+|---|---|---|---|---|
+| **RW Database daily CSV** (GitLab) | `retraction_watch.csv`, commits daily | ~65k retractions | Yes — sourced retractions with reasons, dates, authors, journal | ✅ **Built 2026-07-22** as `graph_processing/pull_retraction_watch_csv.py` — but MANUAL, not daily/cron'd: the user wants to freeze the current snapshot to publish an article against a known, reproducible dataset, and only refresh when they explicitly choose to. Pulls from `gitlab.com/crossref/retraction-watch-data/-/raw/main/retraction_watch.csv`, with core-column + row-count-drop sanity checks and a timestamped archive of the file it replaces. Does not itself re-run any downstream sensor. |
+| **Hijacked Journal Checker** | Google Sheet, 450+ entries | 450+ journals | Yes — each entry is a confirmed hijacked/cloned journal with evidence | ✅ **Built 2026-07-22** as `graph_processing/hijacked_journal_checker.py` — but kept **unscored** review context, not fed into `journal_integrity_flag_count` as originally suggested here: many rows share an identical title/ISSN between clone and real journal, and this graph can't tell which "instance" a given paper came from, so scoring it risked penalizing papers legitimately published in the real journal. 5/636 graph journals matched, 27/795 candidates covered. |
+| **Cabanac ChatGPT‑writing list** | HTML page, PubPeer‑verified | ~90 DOIs | Yes — each entry has a PubPeer comment confirming AI‑generated text fingerprint | New `Paper.cabanac_chatgpt_flag = true`. Calibrates the `ai-text-tell-detector` heuristic by giving it confirmed‑positive training cases. DOIs matched against OpenAlex IDs in the graph. |
+| **Mass Resignations List** | HTML page, timeline | 55 events | Yes (human‑reported) — but the link to individual‑paper risk is indirect | `Journal.editorial_resignation_event` + date. Label on review card as hard context; **not scored** pending empirical proof of a retraction‑rate correlation on this corpus. |
+
+**Recommended ingest order:** the CSV refresh hits the broadest set (every existing
+RW‑sourced node stays fresh); then the Hijacked list (maps to an existing sensor,
+fills a gap the DOAJ check can't catch); then Cabanac (small, calibrates
+`ai-text-tell-detector`). Mass Resignations is the lowest priority of the four —
+it's context, not a direct paper‑level signal.
+
+### Reporting‑derived patterns (may become new sensors)
+
+Two recent articles (2026‑07‑20/21) carry metadata‑detectable patterns that
+current sensors don't cover.
+
+#### A. "Open‑database fast‑churn" title template
+
+The Nepal research‑factory article (2026‑07‑21) quotes a preprint finding
+**"formulaic titles and identical methods"** on CDC WONDER / GBD / SEER / NHANES
+database‑study papers — the mill‑production signature. The template is:
+
+> *"X among Y using the [CDC WONDER / NHANES / SEER / GBD] database: a
+> [retrospective analysis / systematic review and meta-analysis]"*
+
+This is **metadata‑only**: the title is on OpenAlex/Crossref, no full text needed.
+
+- **Signal:** moderate. Legitimate epidemiologists use these databases too, so a
+  title‑alone match has an FP floor.
+- **Fit for the current microbiology corpus?** Partial. The mill‑produced papers
+  are dominated by clinical/epidemiology topics (cardiology, oncology, neurology),
+  not microbiology. But the *microbiology corpus may include papers using NCBI
+  SRA / GenBank nucleotide databases*, which are the microbiology equivalent of
+  CDC WONDER — same template, different source database.
+- **Recommendation:** build a regex title‑matcher scoped to both the clinical‑DB
+  set (CDC WONDER/GBD/SEER/NHANES) and the bio‑DB set (SRA/GenBank/GEO/ENA/DDBJ).
+  **Label as soft signal; do not score.** Worth at most 2 hours to build — it's a
+  single regex + a title‑match Cypher pass.
+
+#### B. Conference‑abstract → paper pipeline
+
+Same article: the mill produces conference abstracts that route into journal
+supplements — acceptance at AHA/ESMO/ASCO → supplement publication → possibly
+feeds into a full‑paper refereed route. Crossref/Pubmed sometimes link these.
+This is a **brand‑new signal category**: a short‑latency abstract‑to‑paper
+pipeline across the same author and topic.
+
+- **Metadata‑check:** do OpenAlex/Crossref link a conference‑proceedings DOI to
+  a full‑paper DOI for the same author? Unknown without sampling.
+- **Recommendation:** defer; sample first. If there's evidence that
+  conference‑abstract data is available in the current API surface, a
+  "matched proceeding‑body within 18 months" check is a cheap metadata filter.
+
+#### C. Known‑miller co‑author list (manual, but hard fact)
+
+The Nepal article names a **known paper miller** (Shreya Singh Beniwal) with a
+confirmed DOI trail. The existing `coauthor_other_misconduct` Tier‑A feature only
+fires for *retracted* co‑authors; this would fire for *known‑miller* co‑authors
+whose papers haven't (yet) been retracted.
+
+- **Format:** `data/known_millers.csv` (author name + ORCID + source article URL).
+- **Recommendation:** low base rate on microbiology corpus, but cheap to maintain
+  and high precision. **Keep not‑scored** — guilt‑by‑association, per §0 — but
+  label the co‑authorship on the review card with`⚠️ known miller co‑author` and
+  a link to the RW article.
+- ✅ **Built 2026‑07‑22** as `graph_processing/known_miller_coauthor_checker.py`.
+  Seeded with the Nepal research‑factory case (Mahato, confirmed ORCID; Beniwal,
+  no ORCID found — a live search surfaced a different same‑named person with her
+  own distinct ORCID, confirming the name‑collision risk, so she's documented but
+  NOT cross‑matched). **0 hits on the current corpus**, as expected (different
+  subfield) — reusable infrastructure for corpus expansion / future entries.
+
+### One meta‑signal from RW reporting
+
+Both the Nepal mill and the peer‑review‑bribery piece share a structural pattern:
+modern paper mills increasingly target **conference‑abstract pipelines + peer‑
+review manipulation**, not just fabricated data. Together, the Hijacked Journal
+Checker and the mass‑resignation list make the case that **compromised peer review
+should be Tier‑A scored** on this corpus — it's the #2 retraction reason by RW
+count (~11k), and both lists are clean, hard sources to ground it.

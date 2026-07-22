@@ -16,9 +16,27 @@ and expands every contributing signal into named, sourced evidence:
     A co-author appearing here means "shares a cluster with someone who wrote
     a paper retracted for a misconduct-signal reason," not "formally
     adjudicated." Keep that distinction in any human-facing copy.
-  - journal_retr_rate: the journal's measured retraction rate in this graph.
   - institution_retr_rate: the (worst) involved institution's measured
     retraction rate in this graph -- see institution_retraction_rate.py.
+  - publisher_retr_rate / country_retr_rate / journal_retr_rate_external:
+    EXTERNAL real-world retraction rates (full Retraction Watch csv over a
+    Crossref/OpenAlex total-works denominator, NOT scoped to our own graph)
+    -- see publisher_retraction_rate.py / country_retraction_rate.py /
+    journal_retraction_rate_external.py.
+  - author_retr_rate_external: a FIRST or LAST author's OWN retraction RATE
+    (see tier_a_scoring.py's WEIGHTS comment for the full 2026-07-22 retuning
+    history) -- their ORCID-claimed works as denominator, Retraction Watch
+    matched by DOI (not name) as numerator -- see
+    author_retraction_rate_external.py.
+  - NOTE (removed 2026-07-22): the graph-internal `journal_retr_rate` used to
+    be scored here too, but it and journal_integrity_flag_count's check 3
+    (journal_integrity_check.py) measure the SAME underlying fact -- this
+    journal's retraction rate in our own seeded graph -- one continuously,
+    one as a >10% threshold, so a paper could be scored twice for one real
+    cause. Removed from the score entirely; journal_retr_rate_external above
+    is the real, non-redundant replacement. journal_retr_rate itself still
+    exists as a Tier-B GDS input feature (gds_node_classification.py), just
+    no longer surfaced/scored here.
   - crossref_correction_flag_count: Crossref-deposited correction notice(s)
     on this DOI -- see refresh_correction_history.py.
   - gds_misconduct_prob: the Tier-B GDS node-classification prior, surfaced
@@ -40,7 +58,7 @@ from neo4j import GraphDatabase
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "graph_processing"))
 from normalize_authors import resolve_connection  # noqa: E402
-from tier_a_scoring import WEIGHTS  # noqa: E402 -- single source of truth, see BUG.md #7
+from tier_a_scoring import WEIGHTS, capped_contribution  # noqa: E402 -- single source of truth, see BUG.md #7
 
 # Must match gds_node_classification.py's MISCONDUCT_REASONS (broad,
 # "misconduct-signal" set) -- NOT AuthorInstance.on_misconduct_paper's
@@ -70,10 +88,30 @@ RETURN p.doi AS doi,
        coalesce(p.journal_integrity_flag_count, 0) AS journal_count,
        coalesce(p.ai_text_tell_flag_count, 0) AS ai_count,
        coalesce(p.coauthor_other_misconduct, 0) AS coauthor_misconduct,
-       coalesce(p.journal_retr_rate, 0.0) AS journal_retr_rate,
        coalesce(p.institution_retr_rate, 0.0) AS institution_retr_rate,
        p.institution_retr_rate_name AS institution_retr_rate_name,
        p.institution_retr_rate_n AS institution_retr_rate_n,
+       p.institution_global_retraction_count AS institution_global_retraction_count,
+       p.institution_global_retraction_count_name AS institution_global_retraction_count_name,
+       coalesce(p.journal_hijack_flag, false) AS journal_hijack_flag,
+       p.journal_hijack_original_url AS journal_hijack_original_url,
+       p.journal_hijack_hijacked_url AS journal_hijack_hijacked_url,
+       coalesce(p.known_miller_coauthor, false) AS known_miller_coauthor,
+       p.known_miller_coauthor_name AS known_miller_coauthor_name,
+       p.known_miller_source_url AS known_miller_source_url,
+       coalesce(p.publisher_retr_rate, 0.0) AS publisher_retr_rate,
+       p.publisher_retr_rate_name AS publisher_retr_rate_name,
+       p.publisher_retr_rate_n AS publisher_retr_rate_n,
+       coalesce(p.country_retr_rate, 0.0) AS country_retr_rate,
+       p.country_retr_rate_name AS country_retr_rate_name,
+       p.country_retr_rate_n AS country_retr_rate_n,
+       coalesce(p.journal_retr_rate_external, 0.0) AS journal_retr_rate_external,
+       p.journal_retr_rate_external_n AS journal_retr_rate_external_n,
+       coalesce(p.author_retr_rate_external, 0.0) AS author_retr_rate_external,
+       p.author_retr_rate_external_name AS author_retr_rate_external_name,
+       p.author_retr_rate_external_position AS author_retr_rate_external_position,
+       coalesce(p.author_retr_rate_external_n, 0) AS author_retr_rate_external_n,
+       p.author_retr_rate_external_total AS author_retr_rate_external_total,
        coalesce(p.crossref_correction_count, 0) AS correction_count,
        p.crossref_correction_dois AS correction_dois,
        p.gds_misconduct_prob AS gds_prob,
@@ -107,8 +145,11 @@ def calculate_score(row: dict) -> float:
         row["journal_count"] * WEIGHTS["journal_integrity_flag_count"] +
         row["ai_count"] * WEIGHTS["ai_text_tell_flag_count"] +
         row["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"] +
-        row["journal_retr_rate"] * WEIGHTS["journal_retr_rate"] +
         row["institution_retr_rate"] * WEIGHTS["institution_retr_rate"] +
+        capped_contribution("publisher_retr_rate", row["publisher_retr_rate"]) +
+        capped_contribution("country_retr_rate", row["country_retr_rate"]) +
+        capped_contribution("journal_retr_rate_external", row["journal_retr_rate_external"]) +
+        capped_contribution("author_retr_rate_external", row["author_retr_rate_external"]) +
         row["correction_count"] * WEIGHTS["crossref_correction_flag_count"]
     )
 
@@ -199,6 +240,11 @@ def main() -> None:
                     "count": row["journal_count"],
                     "weight": WEIGHTS["journal_integrity_flag_count"],
                     "contribution": row["journal_count"] * WEIGHTS["journal_integrity_flag_count"],
+                    "note": ("This flag fires for any ONE of three different checks (see "
+                             "sensors/journal_integrity_check.py): an OA-only publisher's journal missing "
+                             "from DOAJ, explicit Scopus/Web-of-Science delisting, or this journal crossing "
+                             "a >10% retraction-rate threshold measured in our own graph -- the same weight "
+                             "can mean different things paper to paper. The specific reason for THIS paper:"),
                     "reason": journal_flags[0].get("reason") if journal_flags else "unknown",
                 })
 
@@ -235,15 +281,6 @@ def main() -> None:
                     ],
                 })
 
-            if row["journal_retr_rate"] > 0:
-                flags_summary.append({
-                    "type": "journal_retr_rate",
-                    "value": round(row["journal_retr_rate"], 3),
-                    "weight": WEIGHTS["journal_retr_rate"],
-                    "contribution": round(row["journal_retr_rate"] * WEIGHTS["journal_retr_rate"], 2),
-                    "note": f"{row['journal']} has a {row['journal_retr_rate']:.1%} retraction rate in this graph.",
-                })
-
             if row["institution_retr_rate"] > 0:
                 flags_summary.append({
                     "type": "institution_retr_rate",
@@ -252,6 +289,111 @@ def main() -> None:
                     "contribution": round(row["institution_retr_rate"] * WEIGHTS["institution_retr_rate"], 2),
                     "note": (f"{row['institution_retr_rate_name']} has a {row['institution_retr_rate']:.1%} "
                              f"retraction rate in this graph (n={row['institution_retr_rate_n']} papers)."),
+                })
+
+            if row["institution_global_retraction_count"]:
+                flags_summary.append({
+                    "type": "institution_global_retraction_count",
+                    "count": row["institution_global_retraction_count"],
+                    "scored": False,
+                    "note": (f"{row['institution_global_retraction_count_name']} has "
+                             f"{row['institution_global_retraction_count']} retraction(s) exact-name-matched in the "
+                             f"FULL Retraction Watch csv (all subjects) -- NOT scoped to this graph. Raw count, not "
+                             f"a rate; coverage is deliberately partial (exact match only). Context only, never scored."),
+                })
+
+            if row["journal_hijack_flag"]:
+                flags_summary.append({
+                    "type": "journal_hijack_flag",
+                    "scored": False,
+                    "hijacked_url": row["journal_hijack_hijacked_url"],
+                    "original_url": row["journal_hijack_original_url"],
+                    "note": (f"{row['journal']}'s name/ISSN is documented in the Retraction Watch / Anna Abalkina "
+                             "Hijacked Journal Checker: a scam site clones it to solicit fraudulent 'publications'. "
+                             f"Real site: {row['journal_hijack_original_url'] or 'unknown'} -- clone site: "
+                             f"{row['journal_hijack_hijacked_url']}. This does NOT mean this specific paper came "
+                             "from the clone -- verify which site it actually appeared on. Context only, never scored."),
+                })
+
+            if row["known_miller_coauthor"]:
+                flags_summary.append({
+                    "type": "known_miller_coauthor",
+                    "scored": False,
+                    "miller_name": row["known_miller_coauthor_name"],
+                    "source_url": row["known_miller_source_url"],
+                    "note": (f"👤 {row['known_miller_coauthor_name']} -- named in investigative reporting as a "
+                             f"paper-mill participant ({row['known_miller_source_url']}) -- co-authored this paper. "
+                             "Guilt by co-authorship with a documented bad actor is associative, not a finding "
+                             "about this paper's own conduct (§0). Context only, never scored."),
+                })
+
+            if row["publisher_retr_rate"] > 0:
+                contrib = capped_contribution("publisher_retr_rate", row["publisher_retr_rate"])
+                capped = contrib < row["publisher_retr_rate"] * WEIGHTS["publisher_retr_rate"]
+                flags_summary.append({
+                    "type": "publisher_retr_rate",
+                    "value": round(row["publisher_retr_rate"], 5),
+                    "weight": WEIGHTS["publisher_retr_rate"],
+                    "contribution": round(contrib, 4),
+                    "capped": capped,
+                    "note": (f"{row['publisher_retr_rate_name']} has an external (Retraction Watch / Crossref) "
+                             f"retraction rate of {row['publisher_retr_rate']:.3%} "
+                             f"(n={row['publisher_retr_rate_n']} RW-recorded retractions) -- NOT scoped to our own graph."
+                             + (f" Contribution capped at {WEIGHTS['publisher_retr_rate_cap']} (see plan.md 2026-07-22 "
+                                "caps update) so a single infamous publisher can't outrank direct per-paper evidence."
+                                if capped else "")),
+                })
+
+            if row["country_retr_rate"] > 0:
+                contrib = capped_contribution("country_retr_rate", row["country_retr_rate"])
+                capped = contrib < row["country_retr_rate"] * WEIGHTS["country_retr_rate"]
+                flags_summary.append({
+                    "type": "country_retr_rate",
+                    "value": round(row["country_retr_rate"], 5),
+                    "weight": WEIGHTS["country_retr_rate"],
+                    "contribution": round(contrib, 4),
+                    "capped": capped,
+                    "note": (f"{row['country_retr_rate_name']} has an external (Retraction Watch / OpenAlex) "
+                             f"retraction rate of {row['country_retr_rate']:.3%} "
+                             f"(n={row['country_retr_rate_n']} RW-recorded retractions) -- NOT scoped to our own graph."
+                             + (f" Contribution capped at {WEIGHTS['country_retr_rate_cap']}." if capped else "")),
+                })
+
+            if row["journal_retr_rate_external"] > 0:
+                contrib = capped_contribution("journal_retr_rate_external", row["journal_retr_rate_external"])
+                capped = contrib < row["journal_retr_rate_external"] * WEIGHTS["journal_retr_rate_external"]
+                flags_summary.append({
+                    "type": "journal_retr_rate_external",
+                    "value": round(row["journal_retr_rate_external"], 5),
+                    "weight": WEIGHTS["journal_retr_rate_external"],
+                    "contribution": round(contrib, 4),
+                    "capped": capped,
+                    "note": (f"{row['journal']} has an external (Retraction Watch / Crossref Journals API) "
+                             f"retraction rate of {row['journal_retr_rate_external']:.3%} "
+                             f"(n={row['journal_retr_rate_external_n']} RW-recorded retractions) -- NOT scoped to our own graph."
+                             + (f" Contribution capped at {WEIGHTS['journal_retr_rate_external_cap']}." if capped else "")),
+                })
+
+            if row["author_retr_rate_external_n"] > 0:
+                contrib = capped_contribution("author_retr_rate_external", row["author_retr_rate_external"])
+                capped = contrib < row["author_retr_rate_external"] * WEIGHTS["author_retr_rate_external"]
+                flags_summary.append({
+                    "type": "author_retr_rate_external",
+                    "count": row["author_retr_rate_external_n"],
+                    "value": round(row["author_retr_rate_external"], 5),
+                    "weight": WEIGHTS["author_retr_rate_external"],
+                    "contribution": round(contrib, 2),
+                    "capped": capped,
+                    "note": (f"{row['author_retr_rate_external_n']} out of {row['author_retr_rate_external_name']}'s "
+                             f"({row['author_retr_rate_external_position']} author) "
+                             f"{row['author_retr_rate_external_total']} ORCID-claimed works were retracted "
+                             f"({row['author_retr_rate_external']:.1%}), per Retraction Watch -- matched by DOI "
+                             "against their own ORCID record, not by name. Same person ≠ same responsibility (§0): "
+                             "this is the author's track record across ALL their claimed work, not a finding about "
+                             "this paper."
+                             + (f" Contribution capped at {WEIGHTS['author_retr_rate_external_cap']} so one "
+                                "prolific repeat-offender author can't dwarf every other candidate's entire score."
+                                if capped else "")),
                 })
 
             if row["correction_count"] > 0:
