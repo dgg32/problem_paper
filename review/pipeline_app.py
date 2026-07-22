@@ -139,7 +139,12 @@ STAGES: list[Stage] = [
     Stage("ai_text_tell_detector", "ai_text_tell_detector.py", "phase4",
           [PYTHON, "sensors/ai_text_tell_detector.py", "--sample", "800"],
           "~30 min -- fetches full text (first sensor to warm the shared cache). "
-          "--sample 800 required for full coverage; the default caps at only 100 papers."),
+          "--sample 800 required for full coverage; the default caps at only 100 papers. "
+          "MOVED OUT OF ROUTINE RERUNS (2026-07-22): 0/795 hits on a confirmed full-corpus "
+          "scan -- the crude \"as an AI language model\" phrase tells it looks for are a "
+          "shrinking-yield, ChatGPT-3.5-era artifact that both careful users and paper mills "
+          "have learned to strip. Kept runnable manually; not worth the ~30min in routine reruns.",
+          optional=True),
     Stage("p_value_hacking_detector", "p_value_hacking_detector.py", "phase4",
           [PYTHON, "sensors/p_value_hacking_detector.py", "--sample", "800"],
           "~30 min -- full-text based, shares the cache the previous stage warmed."),

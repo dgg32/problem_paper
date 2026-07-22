@@ -64,6 +64,7 @@ TAG_LABELS = [
     ("publisher-high-retr", "High retract rate publisher"),
     ("journal-hijack", "Journal hijacking target"),
     ("known-miller", "Known miller co-author"),
+    ("cabanac-chatgpt", "ChatGPT text tell (Cabanac)"),
     ("ai", "AI-text tells"),
     ("pval", "p-value pattern"),
     ("erratum", "Erratum"),
@@ -140,6 +141,9 @@ RETURN p.doi AS doi, p.title AS title, j.name AS journal,
        coalesce(p.known_miller_coauthor, false) AS known_miller_coauthor,
        p.known_miller_coauthor_name AS known_miller_coauthor_name,
        p.known_miller_source_url AS known_miller_source_url,
+       coalesce(p.cabanac_chatgpt_flag, false) AS cabanac_chatgpt_flag,
+       p.cabanac_chatgpt_fingerprint AS cabanac_chatgpt_fingerprint,
+       p.cabanac_chatgpt_pubpeer_url AS cabanac_chatgpt_pubpeer_url,
        coalesce(p.publisher_retr_rate, 0.0) AS publisher_retr_rate,
        p.publisher_retr_rate_name AS publisher_retr_rate_name,
        p.publisher_retr_rate_n AS publisher_retr_rate_n,
@@ -611,6 +615,20 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             'Guilt by co-authorship with a documented bad actor is associative, not a finding about '
             'this paper\'s own conduct (§0). Context only, never scored.</span></div>'
         )
+    if r["cabanac_chatgpt_flag"]:
+        pp_url = r["cabanac_chatgpt_pubpeer_url"]
+        pp_link = (
+            f'<a href="{esc(pp_url)}" target="_blank" rel="noopener">PubPeer thread</a>' if pp_url
+            else '<span class="muted">no PubPeer thread yet</span>'
+        )
+        ctx.append(
+            f'<div class="ctx"><span class="ctx-t">🤖 ChatGPT text tell (Cabanac PPS)</span> '
+            f'{pp_link}<br>'
+            f'<span class="muted">matched fingerprint(s): "{esc(r["cabanac_chatgpt_fingerprint"])}". '
+            'Confirmed by Guillaume Cabanac\'s Problematic Paper Screener, independent of our own '
+            'ai_text_tell_flag_count sensor. Context only, calibrates that sensor rather than adding a '
+            'second scored signal for the same phenomenon.</span></div>'
+        )
     suppl = r["pmc_suppl_status"]
     if suppl and suppl != "unchecked":
         if suppl == "pmc_suppl" and r["pmc_suppl_url"]:
@@ -720,6 +738,8 @@ def main() -> None:
                 badges.append('<span class="badge badge-flag" title="This journal name/ISSN is a documented hijacking target -- see review context below">⚠ Journal hijacking target</span>'); tags.append("journal-hijack")
             if r["known_miller_coauthor"]:
                 badges.append(f'<span class="badge badge-flag" title="Co-authored with {esc(r["known_miller_coauthor_name"])}, named in investigative reporting as a paper-mill participant">⚠️ Known miller co-author</span>'); tags.append("known-miller")
+            if r["cabanac_chatgpt_flag"]:
+                badges.append('<span class="badge badge-flag" title="Confirmed by Guillaume Cabanac\'s Problematic Paper Screener -- see review context below">🤖 ChatGPT text tell (Cabanac)</span>'); tags.append("cabanac-chatgpt")
             if r["ai_count"] > 0:
                 badges.append(f'<span class="badge badge-flag">AI-text tells ({r["ai_count"]})</span>'); tags.append("ai")
             if r["pval_count"] > 0:
@@ -911,11 +931,15 @@ PAGE_TEMPLATE = """<!doctype html>
   <h1>Papers flagged for human review</h1>
   <div class="gen">Generated {generated} &middot; private local file — not shared</div>
   <div class="banner">
-    <strong>These are hypotheses for review, not accusations.</strong> A retraction or a flag is not proof of fraud, and
-    nothing here asserts misconduct by any named person — author role and responsibility vary paper to paper.
-    🚩 shows review priority from the weighted score (🚩🚩🚩🚩🚩 ≥12 &middot; 🚩🚩🚩🚩 ≥9 &middot; 🚩🚩🚩 ≥6 &middot;
-    🚩🚩 ≥3 &middot; 🚩 &gt;0); the exact score sits under each gauge and drives the sort. Every point maps to a named,
-    sourced flag you can inspect below.
+    <strong>These are hypotheses for review, not accusations.</strong>
+    <span class="help-wrap">
+      <button class="help-btn" type="button" aria-label="More context">!</button>
+      <span class="help-pop">A retraction or a flag is not proof of fraud, and nothing here asserts misconduct by any
+        named person — author role and responsibility vary paper to paper. 🚩 shows review priority from the weighted
+        score (🚩🚩🚩🚩🚩 ≥12 &middot; 🚩🚩🚩🚩 ≥9 &middot; 🚩🚩🚩 ≥6 &middot; 🚩🚩 ≥3 &middot; 🚩 &gt;0); the exact score
+        sits under each gauge and drives the sort. Every point maps to a named, sourced flag you can inspect
+        below.</span>
+    </span>
   </div>
   <div class="stats">
     <span><strong>{n}</strong> papers ranked</span>

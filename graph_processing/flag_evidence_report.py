@@ -99,6 +99,9 @@ RETURN p.doi AS doi,
        coalesce(p.known_miller_coauthor, false) AS known_miller_coauthor,
        p.known_miller_coauthor_name AS known_miller_coauthor_name,
        p.known_miller_source_url AS known_miller_source_url,
+       coalesce(p.cabanac_chatgpt_flag, false) AS cabanac_chatgpt_flag,
+       p.cabanac_chatgpt_fingerprint AS cabanac_chatgpt_fingerprint,
+       p.cabanac_chatgpt_pubpeer_url AS cabanac_chatgpt_pubpeer_url,
        coalesce(p.publisher_retr_rate, 0.0) AS publisher_retr_rate,
        p.publisher_retr_rate_name AS publisher_retr_rate_name,
        p.publisher_retr_rate_n AS publisher_retr_rate_n,
@@ -325,6 +328,18 @@ def main() -> None:
                              f"paper-mill participant ({row['known_miller_source_url']}) -- co-authored this paper. "
                              "Guilt by co-authorship with a documented bad actor is associative, not a finding "
                              "about this paper's own conduct (§0). Context only, never scored."),
+                })
+
+            if row["cabanac_chatgpt_flag"]:
+                flags_summary.append({
+                    "type": "cabanac_chatgpt_flag",
+                    "scored": False,
+                    "fingerprint": row["cabanac_chatgpt_fingerprint"],
+                    "pubpeer_url": row["cabanac_chatgpt_pubpeer_url"],
+                    "note": (f"Matched fingerprint(s): \"{row['cabanac_chatgpt_fingerprint']}\". Confirmed by "
+                             "Guillaume Cabanac's Problematic Paper Screener, independent of our own "
+                             "ai_text_tell_flag_count sensor. Context only -- calibrates that sensor rather than "
+                             "adding a second scored signal for the same phenomenon."),
                 })
 
             if row["publisher_retr_rate"] > 0:
