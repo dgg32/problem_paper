@@ -58,10 +58,13 @@ TAG_LABELS = [
     ("cites-retracted", "Cites retracted"),
     ("cites-retracted-ext", "Cites retracted (ext.)"),
     ("self-cite", "Cites own retracted"),
+    ("correction", "Crossref correction"),
     ("journal", "Journal integrity"),
     ("author-retr", "Main authors of retracted works"),
     ("journal-high-retr", "High retract rate journal"),
     ("publisher-high-retr", "High retract rate publisher"),
+    ("institution-high-retr", "High retract rate institution"),
+    ("country-high-retr", "High retract rate country"),
     ("journal-hijack", "Journal hijacking target"),
     ("known-miller", "Known miller co-author"),
     ("cabanac-chatgpt", "ChatGPT text tell (Cabanac)"),
@@ -83,6 +86,20 @@ TAG_LABELS = [
 # Hindawi's 2023-2024 mass-retraction event at 8.4%) without also flagging
 # the long tail of ordinary low-single-digit-percent venues.
 HIGH_EXTERNAL_RATE_THRESHOLD = 0.05
+
+# Threshold for the "High retract rate country" chip, calibrated separately
+# from HIGH_EXTERNAL_RATE_THRESHOLD above -- country_retr_rate lives on a
+# TWO-ORDERS-OF-MAGNITUDE smaller scale (max observed ~0.33%, see
+# country_retraction_rate.py), so reusing 5% would never fire. Checked
+# 2026-07-22 against the full not-yet-retracted candidate population (796
+# papers): country_retr_rate is present (>0) for 34% of candidates -- too
+# broad to badge as "notable" on its own, unlike author-retr/institution-
+# high-retr below where ANY signal at all is already rare. The top-10%-by-
+# rank cutoff measured 0.126%; 0.125% is used here as a clean round number
+# at that same cut, catching ~80 of 796 candidates (countries from roughly
+# Senegal/Kazakhstan's rate upward) instead of a third of the corpus.
+# Re-check this cutoff if the candidate population changes meaningfully.
+HIGH_COUNTRY_RATE_THRESHOLD = 0.00125
 
 # 🚩 priority gauge: map the continuous weighted score to 1-5 review-priority
 # flags for at-a-glance triage. Thresholds are fixed + documented (shown in the
@@ -230,6 +247,55 @@ def score(r: dict) -> float:
     )
 
 
+# Chips whose tag corresponds to an actual scored weight (as opposed to
+# unscored/context-only tags like pubpeer, journal-hijack, suppl, etc.) --
+# 2026-07-22, user request: these chips stop being show/hide filters and
+# become live score-inclusion toggles instead (click = zero that signal's
+# contribution across every paper and re-rank, nothing gets hidden). Every
+# other TAG_LABELS entry keeps the old filter behaviour unchanged, since
+# there's nothing for them to zero out.
+SCORED_TAGS = {
+    "eoc", "ori", "coauthor", "cites-retracted", "cites-retracted-ext",
+    "correction", "journal", "author-retr", "journal-high-retr", "publisher-high-retr",
+    "institution-high-retr", "country-high-retr",
+    "ai", "pval", "erratum", "paperconan",
+}
+
+
+def chip_contributions(r: dict) -> dict[str, float]:
+    """Per-signal score contribution for each SCORED_TAGS chip -- all 5
+    entity-rate minmax signals now have their own chip (institution-high-retr
+    and country-high-retr added 2026-07-22, retiring the old bundled 5-signal
+    switch entirely; see HIGH_COUNTRY_RATE_THRESHOLD's comment for why
+    institution uses presence-only (>0) while country needed its own
+    calibrated cutoff). Embedded as JSON on each card (data-contribs) so the
+    browser can subtract any subset live without a page reload -- mirrors
+    minmax_total()'s terms exactly, just broken out signal-by-signal."""
+    adj = r.get("paperconan_adjudication")
+    return {
+        "eoc": r["eoc_flag"] * WEIGHTS["pubmed_eoc_flag"],
+        "ori": r["ori_flag"] * WEIGHTS["ori_finding_flag"],
+        "coauthor": r["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"],
+        "cites-retracted": r["ret_count"] * WEIGHTS["retracted_citation_flag_count"],
+        "cites-retracted-ext": r["ext_ret_count"] * WEIGHTS["external_retracted_citation_flag_count"],
+        "correction": r["correction_count"] * WEIGHTS["crossref_correction_flag_count"],
+        "journal": r["journal_count"] * WEIGHTS["journal_integrity_flag_count"],
+        "author-retr": minmax_contribution("author_retr_rate_external", r["author_retr_rate_external"]),
+        "journal-high-retr": minmax_contribution("journal_retr_rate_external", r["journal_retr_rate_external"]),
+        "publisher-high-retr": minmax_contribution("publisher_retr_rate", r["publisher_retr_rate"]),
+        "ai": r["ai_count"] * WEIGHTS["ai_text_tell_flag_count"],
+        "pval": r["pval_count"] * WEIGHTS["p_value_hacking_flag_count"],
+        "erratum": r["erratum_flag"] * WEIGHTS["pubmed_erratum_flag"],
+        "paperconan": (
+            WEIGHTS["paperconan_confirmed"] if adj == "confirmed"
+            else WEIGHTS["paperconan_needs_human"] if adj == "needs_human" else 0.0
+        ),
+        "institution-high-retr": minmax_contribution(
+            "institution_retr_rate_external", r["institution_retr_rate_external"]),
+        "country-high-retr": minmax_contribution("country_retr_rate", r["country_retr_rate"]),
+    }
+
+
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
@@ -332,7 +398,7 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
     """Build the expandable per-paper evidence HTML."""
     parts: list[str] = []
 
-    def row(label, contrib, body, help=None):
+    def row(label, contrib, body, help=None, tag=None):
         # publisher_retr_rate/country_retr_rate are real-world-scale rates
         # (typically 0.0001-0.08, see config/weights.yaml) -- at 2 decimals
         # their contribution rounds to "+0.00", which reads as "no score"
@@ -353,9 +419,18 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
                 f'<span class="help-pop">{help}</span>'
                 "</span>"
             )
+        # Optional `tag`: this row's SCORED_TAGS chip key, if it has one.
+        # 2026-07-22, user-noticed inconsistency: toggling a scoring chip
+        # already re-ranked the card-level score, but this row (baked in at
+        # build time) kept showing its old "+X.XX" regardless -- looked like
+        # the chip hadn't done anything if you had a card expanded. JS reads
+        # data-tag to strike the row through (and swap in "+0.00") whenever
+        # its chip is currently toggled off; data-full preserves the real
+        # value so it can be restored exactly, no re-render needed.
+        tag_attr = f' data-tag="{tag}"' if tag else ""
         return (
-            f'<div class="ev"><div class="ev-h"><span class="ev-tg"><span class="ev-t">{esc(label)}</span>{help_html}</span>'
-            f'<span class="ev-c">{contrib_str}</span></div>'
+            f'<div class="ev"{tag_attr}><div class="ev-h"><span class="ev-tg"><span class="ev-t">{esc(label)}</span>{help_html}</span>'
+            f'<span class="ev-c" data-full="{contrib_str}">{contrib_str}</span></div>'
             f'<div class="ev-b">{body}</div></div>'
         )
 
@@ -366,6 +441,7 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             f'Respondent: 👤 {esc(r["ori_respondent"]) or "unnamed"} &middot; date: {esc(r["ori_date"]) or "unknown"} &middot; '
             f'<a href="{esc(r["ori_doc_url"])}" target="_blank" rel="noopener">Federal Register notice</a>. '
             'An adjudicated federal finding naming this paper by DOI — the strongest fact-based signal here.',
+            tag="ori",
         ))
 
     if r["eoc_flag"]:
@@ -376,6 +452,7 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             WEIGHTS["pubmed_eoc_flag"],
             f'Date: {esc(r["eoc_date"]) or "unknown"}{link}. '
             'A formal, dated editorial fact — stronger than community commentary, weaker than a retraction.',
+            tag="eoc",
         ))
 
     if r["coauthor_misconduct"] > 0:
@@ -396,6 +473,7 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
                  'matched via a fuzzier probable-person cluster (not strict ORCID), and only counts '
                  'misconduct-REASON retractions found elsewhere IN THIS GRAPH — not an external, all-cause, '
                  'ORCID-verified rate.',
+            tag="coauthor",
         ))
 
     if r["ret_count"] > 0:
@@ -432,6 +510,7 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             r["ret_count"] * WEIGHTS["retracted_citation_flag_count"],
             f'<ul>{items}</ul>',
             help=self_help,
+            tag="cites-retracted",
         ))
 
     if r["ext_ret_count"] > 0:
@@ -449,6 +528,7 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             f'<ul>{items}</ul>',
             help='Retracted per OpenAlex, but outside our own Retraction-Watch-seeded '
                  'corpus — no reason/date/self-citation context available, confirmed retraction status only.',
+            tag="cites-retracted-ext",
         ))
 
     # Journal/publisher-level signals grouped together. The graph-internal
@@ -471,6 +551,7 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
                  "this journal crossing a >10% retraction-rate threshold measured in OUR OWN graph (the same "
                  "underlying fact as the removed \"Journal retraction rate\" row, just thresholded instead of "
                  "continuous) -- so the same +1.00 score can mean quite different things paper to paper.",
+            tag="journal",
         ))
 
     def minmax_note(key: str) -> str:
@@ -491,6 +572,7 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             f'{esc(r["journal"])} has a real-world {r["journal_retr_rate_external"]:.3%} retraction rate '
             f'(Retraction Watch / Crossref Journals API, n={r["journal_retr_rate_external_n"]}).',
             help=minmax_note("journal_retr_rate_external"),
+            tag="journal-high-retr",
         ))
 
     if r["publisher_retr_rate"] > 0:
@@ -500,6 +582,7 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             f'{esc(r["publisher_retr_rate_name"])} has a real-world {r["publisher_retr_rate"]:.3%} retraction rate '
             f'(Retraction Watch / Crossref, n={r["publisher_retr_rate_n"]}).',
             help=minmax_note("publisher_retr_rate"),
+            tag="publisher-high-retr",
         ))
 
     if r["institution_retr_rate_external"] > 0:
@@ -511,6 +594,7 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             f'(Retraction Watch / OpenAlex via ROR, '
             f'n={r["institution_retr_rate_external_n"]}/{r["institution_retr_rate_external_total"]}).',
             help=minmax_note("institution_retr_rate_external"),
+            tag="institution-high-retr",
         ))
 
     if r["country_retr_rate"] > 0:
@@ -520,6 +604,7 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             f'{esc(r["country_retr_rate_name"])} has a real-world {r["country_retr_rate"]:.3%} retraction rate '
             f'(Retraction Watch / OpenAlex, n={r["country_retr_rate_n"]}).',
             help=minmax_note("country_retr_rate"),
+            tag="country-high-retr",
         ))
 
     if r["author_retr_rate_external_n"] > 0:
@@ -541,6 +626,7 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             f'{r["author_retr_rate_external_total"]} ORCID-claimed works were retracted '
             f'({r["author_retr_rate_external"]:.1%}).',
             help=author_help,
+            tag="author-retr",
         ))
 
     if r["correction_count"] > 0:
@@ -554,6 +640,7 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             r["correction_count"] * WEIGHTS["crossref_correction_flag_count"],
             '<p class="caveat">Corrections are often benign (typo/affiliation fixes) -- kept low-weight.</p>'
             f'<ul>{items}</ul>',
+            tag="correction",
         ))
 
     if r["ai_count"] > 0:
@@ -561,15 +648,15 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
         pats = ", ".join(esc(f.get("pattern")) for f in flags[:4])
         if len(flags) > 4:
             pats += f' <span class="muted">…and {len(flags) - 4} more</span>'
-        parts.append(row(f'AI-text tells ({r["ai_count"]})', r["ai_count"] * WEIGHTS["ai_text_tell_flag_count"], pats))
+        parts.append(row(f'AI-text tells ({r["ai_count"]})', r["ai_count"] * WEIGHTS["ai_text_tell_flag_count"], pats, tag="ai"))
 
     if r["pval_count"] > 0:
         flags = json.loads(r["pval_flags"] or "[]")
         note = flags[0].get("reason") if flags else "p-value clustering"
-        parts.append(row(f'p-value pattern ({r["pval_count"]})', r["pval_count"] * WEIGHTS["p_value_hacking_flag_count"], esc(note)))
+        parts.append(row(f'p-value pattern ({r["pval_count"]})', r["pval_count"] * WEIGHTS["p_value_hacking_flag_count"], esc(note), tag="pval"))
 
     if r["erratum_flag"]:
-        parts.append(row("Erratum on record", WEIGHTS["pubmed_erratum_flag"], "A published erratum exists (weak signal — most errata are benign corrections)."))
+        parts.append(row("Erratum on record", WEIGHTS["pubmed_erratum_flag"], "A published erratum exists (weak signal — most errata are benign corrections).", tag="erratum"))
 
     pc = pc_runs.get(r["doi"])
     pc_adj = pc.get("adjudicated") if pc else None
@@ -580,6 +667,7 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             label, weight,
             f'{esc(pc.get("top_finding") or "")}. {esc(pc.get("conclusion") or "")} '
             f'<span class="muted">Full run: <code>runs/{esc(pc.get("_dir") or "")}/</code></span>',
+            tag="paperconan",
         ))
 
     # --- non-scored review context ---
@@ -761,6 +849,8 @@ def main() -> None:
                     badges.append(f'<span class="badge badge-selfcite" title="Cites the authors\' OWN retracted work">👤 Cites own retracted ({n_self})</span>'); tags.append("self-cite")
             if r["ext_ret_count"] > 0:
                 badges.append(f'<span class="badge badge-flag" title="Retracted per OpenAlex, outside our Retraction-Watch corpus">Cites retracted (ext.) ({r["ext_ret_count"]})</span>'); tags.append("cites-retracted-ext")
+            if r["correction_count"] > 0:
+                badges.append(f'<span class="badge badge-flag" title="Corrections are often benign -- kept low-weight">Crossref correction ({r["correction_count"]})</span>'); tags.append("correction")
             if r["journal_count"] > 0:
                 badges.append('<span class="badge badge-flag">Journal integrity flag</span>'); tags.append("journal")
             if r["author_retr_rate_external_n"] > 0:
@@ -769,6 +859,14 @@ def main() -> None:
                 badges.append(f'<span class="badge badge-flag" title="{r["journal_retr_rate_external"]:.1%} real-world retraction rate">📔 High retract rate journal</span>'); tags.append("journal-high-retr")
             if r["publisher_retr_rate"] >= HIGH_EXTERNAL_RATE_THRESHOLD:
                 badges.append(f'<span class="badge badge-flag" title="{r["publisher_retr_rate"]:.1%} real-world retraction rate">📇 High retract rate publisher</span>'); tags.append("publisher-high-retr")
+            if r["institution_retr_rate_external"] > 0:
+                # Presence-only, not a "high" cutoff -- see HIGH_COUNTRY_RATE_THRESHOLD's
+                # comment: only 4% of candidates have ANY external institution-level
+                # retraction record at all, so that alone is already a rare, notable
+                # signal (same reasoning as author-retr's n>0 condition above).
+                badges.append(f'<span class="badge badge-flag" title="{r["institution_retr_rate_external"]:.4%} real-world retraction rate">🏛️ High retract rate institution</span>'); tags.append("institution-high-retr")
+            if r["country_retr_rate"] >= HIGH_COUNTRY_RATE_THRESHOLD:
+                badges.append(f'<span class="badge badge-flag" title="{r["country_retr_rate"]:.3%} real-world retraction rate">🌍 High retract rate country ({r["country_retr_rate_name"]})</span>'); tags.append("country-high-retr")
             if r["journal_hijack_flag"]:
                 badges.append('<span class="badge badge-flag" title="This journal name/ISSN is a documented hijacking target -- see review context below">⚠ Journal hijacking target</span>'); tags.append("journal-hijack")
             if r["known_miller_coauthor"]:
@@ -804,8 +902,9 @@ def main() -> None:
                 tags.append(f"country-{r['country_retr_rate_name'].lower()}")
             for t in tags:
                 tag_counts[t] = tag_counts.get(t, 0) + 1
+            contribs = chip_contributions(r)
             cards.append(f'''
-    <article class="card" data-score="{sc:.2f}" data-score-nominmax="{sc - minmax_total(r):.2f}" data-rank="{rank}" data-doi="{esc(r['doi'])}" data-tags="{' '.join(tags)}">
+    <article class="card" data-score="{sc:.2f}" data-contribs='{json.dumps(contribs)}' data-rank="{rank}" data-doi="{esc(r['doi'])}" data-tags="{' '.join(tags)}">
       <div class="card-h" onclick="this.parentElement.classList.toggle('open')">
         <div class="rank">#{rank}</div>
         <div class="score" title="{flag_gauge(sc)} of 5 review-priority flags · weighted Tier-A score {sc:.1f}">
@@ -830,10 +929,17 @@ def main() -> None:
     n_pp = sum(1 for _, r in ranked if r["pubpeer_total"] > 0)
     generated = date.today().isoformat()
 
-    chips = "".join(
-        f'<button class="chip" data-tag="{k}" onclick="toggleTag(this)">{esc(label)}'
-        f'<span class="chip-n">{tag_counts[k]}</span></button>'
-        for k, label in TAG_LABELS if tag_counts.get(k)
+    score_chips = "".join(
+        f'<button class="chip active" data-tag="{k}" data-mode="score" onclick="toggleScoreChip(this)" '
+        f'title="Included in score -- click to zero this signal and re-rank live (papers stay visible)">'
+        f'{esc(label)}<span class="chip-n">{tag_counts[k]}</span></button>'
+        for k, label in TAG_LABELS if k in SCORED_TAGS and tag_counts.get(k)
+    )
+    filter_chips = "".join(
+        f'<button class="chip" data-tag="{k}" data-mode="filter" onclick="toggleTag(this)" '
+        f'title="Click to filter to only papers carrying this tag">'
+        f'{esc(label)}<span class="chip-n">{tag_counts[k]}</span></button>'
+        for k, label in TAG_LABELS if k not in SCORED_TAGS and tag_counts.get(k)
     )
     country_tags = sorted(
         (k for k in tag_counts if k.startswith("country-")),
@@ -845,7 +951,8 @@ def main() -> None:
     )
     page = PAGE_TEMPLATE.format(
         n=len(ranked), n_eoc=n_eoc, n_pp=n_pp, generated=generated,
-        cards="".join(cards), chips=chips, country_options=country_options,
+        cards="".join(cards), score_chips=score_chips, filter_chips=filter_chips,
+        country_options=country_options,
     )
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_text(page)
@@ -916,6 +1023,7 @@ PAGE_TEMPLATE = """<!doctype html>
   .ev-tg {{ display:inline-flex; align-items:center; gap:5px; }}
   .ev-t {{ font-weight:600; font-size:.92rem; }}
   .ev-c {{ color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums; font-size:.85rem; }}
+  .ev.ev-zeroed .ev-t, .ev.ev-zeroed .ev-c {{ opacity:.45; text-decoration:line-through; }}
   .ev-b {{ font-size:.88rem; color:var(--fg); margin-top:4px; }}
   .ev-b ul {{ margin:5px 0; padding-left:0; list-style:none; }}
   .ev-b li {{ margin:3px 0; }}
@@ -942,7 +1050,12 @@ PAGE_TEMPLATE = """<!doctype html>
   .ctx {{ font-size:.87rem; margin:6px 0; }}
   .ctx-t {{ font-weight:600; }}
   .ctx a {{ color:var(--pp); }}
-  .chips {{ max-width:960px; margin:8px auto 0; padding:0 20px; display:flex; gap:7px; flex-wrap:wrap; align-items:center; }}
+  .chip-group {{ max-width:960px; margin:10px auto 0; padding:0 20px; }}
+  .chip-group-label {{ font-size:.74rem; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; margin-bottom:4px; }}
+  .chip-group-action {{ background:none; border:none; color:var(--pp); cursor:pointer; font-size:.74rem;
+    text-transform:none; letter-spacing:normal; padding:0; margin-left:4px; }}
+  .chip-group-action:hover {{ text-decoration:underline; }}
+  .chips {{ display:flex; gap:7px; flex-wrap:wrap; align-items:center; }}
   .chip {{ font-size:.82rem; padding:4px 11px; border:1px solid var(--line); border-radius:20px; background:var(--card); color:var(--fg); cursor:pointer; display:inline-flex; gap:6px; align-items:center; }}
   .chip:hover {{ border-color:var(--accent); }}
   .chip.active {{ background:var(--accent); color:#fff; border-color:var(--accent); }}
@@ -950,15 +1063,6 @@ PAGE_TEMPLATE = """<!doctype html>
   .chip.active .chip-n {{ opacity:.85; }}
   .filterbar {{ max-width:960px; margin:6px auto 0; padding:0 20px; font-size:.82rem; color:var(--muted); display:flex; gap:12px; align-items:center; }}
   #clear {{ background:none; border:none; color:var(--pp); cursor:pointer; font-size:.82rem; padding:0; display:none; }}
-  .minmax-toggle {{ display:inline-flex; align-items:center; gap:8px; cursor:pointer; color:var(--fg); font-size:.82rem; }}
-  .switch {{ position:relative; display:inline-block; width:34px; height:20px; flex-shrink:0; }}
-  .switch input {{ position:absolute; opacity:0; width:0; height:0; margin:0; cursor:pointer; }}
-  .switch-track {{ position:absolute; inset:0; background:var(--line); border-radius:20px; transition:background .15s ease; }}
-  .switch-track::before {{ content:''; position:absolute; width:16px; height:16px; left:2px; top:2px;
-    background:#fff; border-radius:50%; transition:transform .15s ease; box-shadow:0 1px 2px rgba(0,0,0,.3); }}
-  .switch input:checked + .switch-track {{ background:var(--accent); }}
-  .switch input:checked + .switch-track::before {{ transform:translateX(14px); }}
-  .switch input:focus-visible + .switch-track {{ outline:2px solid var(--accent); outline-offset:2px; }}
   .pager {{ max-width:960px; margin:16px auto; padding:0 20px; display:flex; gap:10px; align-items:center; justify-content:center; font-size:.86rem; color:var(--muted); }}
   .pager button {{ padding:6px 14px; border:1px solid var(--line); border-radius:7px; background:var(--card); color:var(--fg); cursor:pointer; font-size:.85rem; }}
   .pager button:disabled {{ opacity:.4; cursor:default; }}
@@ -1001,24 +1105,19 @@ PAGE_TEMPLATE = """<!doctype html>
     {country_options}
   </select>
 </div>
-<div class="chips">{chips}</div>
-<div class="filterbar">
-  <span id="shown"></span>
-  <button id="clear" onclick="clearTags()">clear filters ✕</button>
-  <span class="muted">tags combine with AND — a paper must carry every selected tag</span>
+<div class="chip-group">
+  <div class="chip-group-label">Scoring signals — highlighted = included; click to zero and re-rank live (nothing hidden)
+    <button class="chip-group-action" onclick="clearAllScoreChips()">Clear all</button>
+  </div>
+  <div class="chips">{score_chips}</div>
+</div>
+<div class="chip-group">
+  <div class="chip-group-label">Filters — click to show only papers carrying every selected tag (AND)</div>
+  <div class="chips">{filter_chips}</div>
 </div>
 <div class="filterbar">
-  <label class="minmax-toggle">
-    <span class="switch">
-      <input type="checkbox" id="includeMinmax" checked onchange="toggleMinmax(this.checked)">
-      <span class="switch-track"></span>
-    </span>
-    include author/institution/publisher/country/journal retraction-rate signals in score
-  </label>
-  <span class="help-wrap">
-    <button class="help-btn" type="button" aria-label="More context">!</button>
-    <span class="help-pop">turn off to re-rank live with those 5 signals zeroed out — compares how much rests on entity association vs. direct evidence</span>
-  </span>
+  <span id="shown"></span>
+  <button id="clear" onclick="clearTags()">reset chips ✕</button>
 </div>
 <div class="pager" id="pagerTop">
   <button id="prevTop" onclick="gotoPage(page-1)">← prev</button>
@@ -1112,7 +1211,7 @@ PAGE_TEMPLATE = """<!doctype html>
     const t = btn.dataset.tag;
     if (activeTags.has(t)) {{ activeTags.delete(t); btn.classList.remove('active'); }}
     else {{ activeTags.add(t); btn.classList.add('active'); }}
-    document.getElementById('clear').style.display = activeTags.size ? '' : 'none';
+    document.getElementById('clear').style.display = (activeTags.size || inactiveScoreTags.size) ? '' : 'none';
     applyFilters();
   }}
   function setCountry(tag) {{
@@ -1120,28 +1219,34 @@ PAGE_TEMPLATE = """<!doctype html>
     // drop any previously-selected country- tag before adding the new one.
     [...activeTags].filter(t => t.startsWith('country-')).forEach(t => activeTags.delete(t));
     if (tag) activeTags.add(tag);
-    document.getElementById('clear').style.display = activeTags.size ? '' : 'none';
+    document.getElementById('clear').style.display = (activeTags.size || inactiveScoreTags.size) ? '' : 'none';
     applyFilters();
   }}
   function clearTags() {{
     activeTags.clear();
-    document.querySelectorAll('.chip.active').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.chip[data-mode="filter"].active').forEach(b => b.classList.remove('active'));
     document.getElementById('countrySelect').value = '';
+    inactiveScoreTags.clear();
+    document.querySelectorAll('.chip[data-mode="score"]').forEach(b => b.classList.add('active'));
     document.getElementById('clear').style.display = 'none';
+    rerank();
     applyFilters();
   }}
 
-  // "Include ecological signals" toggle: ON (default, matches the page's
-  // baked-in build-time order) uses each card's data-score; OFF uses
-  // data-score-nominmax (score minus the 5 minmax_contribution() terms) --
-  // re-sorts + re-displays live. Mirrors the exact FLAG_BANDS thresholds from
-  // flag_gauge() in build_review_page.py so the 🚩 gauge stays consistent
-  // with whichever score is currently active.
+  // Score chips (SCORED_TAGS in build_review_page.py): all 5 entity-rate
+  // minmax signals now have their own chip (institution-high-retr,
+  // country-high-retr added 2026-07-22, retiring the old bundled 5-signal
+  // switch). Toggling one off zeros that signal's per-card contribution
+  // (from data-contribs, a JSON {{tag: value}} blob baked in at build time)
+  // and re-ranks live -- unlike the filter chips above, nothing is hidden.
   const listContainer = document.getElementById('list');
-  let includeMinmax = true;
+  const inactiveScoreTags = new Set();
 
   function activeScore(c) {{
-    return parseFloat(includeMinmax ? c.dataset.score : c.dataset.scoreNominmax);
+    const contribs = JSON.parse(c.dataset.contribs || '{{}}');
+    let sc = parseFloat(c.dataset.score);
+    inactiveScoreTags.forEach(t => {{ if (contribs[t] !== undefined) sc -= contribs[t]; }});
+    return sc;
   }}
   function gaugeFlags(sc) {{
     if (sc >= 12) return 5;
@@ -1164,14 +1269,47 @@ PAGE_TEMPLATE = """<!doctype html>
       c.querySelector('.score').title = flags + ' of 5 review-priority flags · weighted Tier-A score ' + sc.toFixed(1);
     }});
   }}
-  function toggleMinmax(checked) {{
-    includeMinmax = checked;
+  // Evidence rows carry data-tag (set in build_review_page.py's row(), only
+  // for rows tied to a SCORED_TAGS chip) + data-full (the real "+X.XX",
+  // preserved so it can be restored exactly). Strikes a row through and
+  // shows +0.00 while its chip is off -- keeps the always-visible per-signal
+  // breakdown honest with whatever the card-level score currently reflects,
+  // instead of silently showing stale numbers for an excluded signal.
+  function updateEvidenceRows() {{
+    document.querySelectorAll('.ev[data-tag]').forEach(el => {{
+      const zeroed = inactiveScoreTags.has(el.dataset.tag);
+      el.classList.toggle('ev-zeroed', zeroed);
+      const c = el.querySelector('.ev-c');
+      c.textContent = zeroed ? '+0.00' : c.dataset.full;
+    }});
+  }}
+  function rerank() {{
     cards.sort((a, b) => activeScore(b) - activeScore(a));
     listContainer.append(...cards);
     updateCardDisplays();
+    updateEvidenceRows();
+  }}
+  function toggleScoreChip(btn) {{
+    const t = btn.dataset.tag;
+    if (inactiveScoreTags.has(t)) {{ inactiveScoreTags.delete(t); btn.classList.add('active'); }}
+    else {{ inactiveScoreTags.add(t); btn.classList.remove('active'); }}
+    document.getElementById('clear').style.display = (activeTags.size || inactiveScoreTags.size) ? '' : 'none';
+    rerank();
     applyFilters();
   }}
-
+  // Distinct from "reset chips" (which restores the full default view --
+  // every scoring chip back on, all filters cleared): this only zeroes every
+  // scoring signal at once, leaving filters untouched, for the opposite
+  // question -- "what's left if I strip out every scored signal?"
+  function clearAllScoreChips() {{
+    document.querySelectorAll('.chip[data-mode="score"]').forEach(btn => {{
+      inactiveScoreTags.add(btn.dataset.tag);
+      btn.classList.remove('active');
+    }});
+    document.getElementById('clear').style.display = (activeTags.size || inactiveScoreTags.size) ? '' : 'none';
+    rerank();
+    applyFilters();
+  }}
   applyFilters();
 </script>
 </body>
