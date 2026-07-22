@@ -19,9 +19,10 @@ Scoring logic:
   - p_value_hacking_flag_count: weight 0.5 (lowest weight -- plan.md explicitly
     flags this sensor as noisy given the small per-paper p-value sample; see
     sensors/p_value_hacking_detector.py docstring)
-  - pubmed_eoc_flag: weight 2.5 (Expression of Concern -- a formal, dated,
-    journal-issued fact, not a community opinion; found via PubMed's
-    CommentsCorrectionsList, see graph_processing/refresh_editorial_notices.py.
+  - pubmed_eoc_flag: weight 10.0 (raised from 2.5, 2026-07-22, user request --
+    Expression of Concern is a formal, dated, journal-issued fact, not a
+    community opinion; found via PubMed's CommentsCorrectionsList, see
+    graph_processing/refresh_editorial_notices.py.
     NOTE: 166 of 227 EoC papers found 2026-07-19 are one coordinated mass
     action by a single journal on a single ethics-committee investigation --
     each is still individually, formally EoC'd (a real per-paper fact), but
@@ -37,9 +38,15 @@ Scoring logic:
     matched, both already-retracted -- the machinery is in place for future
     re-runs as ORI publishes new findings, but don't expect this to move the
     current ranking much.)
-  - institution_retr_rate: weight 1.5 (an institution's own measured
-    retraction rate in this graph, max across a paper's INVOLVES institutions;
-    see graph_processing/institution_retraction_rate.py, added 2026-07-21.)
+  - institution_retr_rate_external: an institution's retraction rate against
+    an OpenAlex works_count denominator (via its ROR ID -- no name-search
+    ambiguity at all, 100% ROR coverage on this graph's Institution nodes).
+    REPLACES the graph-internal institution_retr_rate in scoring (2026-07-22,
+    same day as the minmax update below, user feedback: the graph-internal
+    rate was "correct but too high to be intuitive" -- same inflation problem
+    already fixed for journal_retr_rate). institution_retr_rate and
+    institution_global_retraction_count both stay as unscored review-card
+    context; see graph_processing/institution_retraction_rate.py.
   - crossref_correction_flag_count: weight 0.3 (tied with pubmed_erratum_flag
     -- found via Crossref's updates:{doi} reverse lookup, i.e. a correction
     notice's own record explicitly links back to this DOI (update-to); a
@@ -48,9 +55,10 @@ Scoring logic:
     graph_processing/refresh_correction_history.py, added 2026-07-21.)
   - publisher_retr_rate: weight 1.5 (a publisher's retraction rate computed
     from the FULL Retraction Watch csv over a Crossref Members API total-
-    dois denominator -- unlike institution_retr_rate this is NOT scoped to
-    our own retraction-seeded graph, so it is a genuine external base rate,
-    not a graph-relative one. See graph_processing/publisher_retraction_rate.py,
+    dois denominator -- NOT scoped to our own retraction-seeded graph (same
+    reasoning as institution_retr_rate_external above), so it is a genuine
+    external base rate, not a graph-relative one. See
+    graph_processing/publisher_retraction_rate.py,
     added 2026-07-22.)
   - country_retr_rate: weight 1.0 (same external-rate reasoning, at country
     granularity via OpenAlex's per-country works count; lowest weight of the
@@ -92,29 +100,57 @@ Scoring logic:
     non-redundant replacement. The property itself still exists as a Tier-B
     GDS input feature (gds_node_classification.py) -- only removed from
     Tier-A scoring/display.
-  - publisher_retr_rate / country_retr_rate / journal_retr_rate_external are
-    CAPPED (added 2026-07-22, see capped_contribution() below), after a real
-    problem surfaced the same day: these three rates are extremely
-    heavy-tailed (most candidates ~0.01%-1%, but a handful of Hindawi-family
-    journals sit at 8%-26%), so NO single linear weight works -- turn it up
-    enough to matter for a typical paper and the tail journals/publishers get
-    a proportionally huge boost, enough alone to jump to #1 regardless of any
-    other evidence about that specific paper; turn it down to tame that and
-    it goes back to invisible for everyone else. There is also a conceptual
-    problem, not just a numeric one: a journal/publisher/country's aggregate
-    rate is evidence about the VENUE, not about THIS paper -- the same
-    ecological-not-direct category as coauthor_other_misconduct (plan.md §0:
-    same person/place ≠ same responsibility) -- so it should never be able to
-    outrank direct per-paper evidence (an ORI finding, this paper's own
-    AI-text tells) purely on venue association. Fix: weight is set high
-    enough to differentiate the normal range, but contribution = min(rate *
-    weight, cap) -- a hard ceiling per signal (currently 2.0 for
-    publisher/journal, 1.5 for country) so the extreme tail can never
-    dominate no matter how elevated the rate. The raw rate is still shown in
-    the evidence text/JSON; only the SCORED contribution is capped.
+  - institution_retr_rate_external / publisher_retr_rate / country_retr_rate /
+    journal_retr_rate_external / author_retr_rate_external are all
+    MINMAX-SCORED (see minmax_contribution() below), not weighted-and-capped.
+    History: these five are entity-level (not per-paper) retraction rates, and
+    are extremely heavy-tailed (most candidates ~0.01%-1%, a handful of
+    Hindawi-family journals/repeat-offender authors sit at 8%-95%), so no
+    single linear weight ever worked -- turn it up enough to matter for a
+    typical paper and the tail alone can jump to #1 regardless of any other
+    evidence about that specific paper; turn it down to tame that and it goes
+    invisible for everyone else. First fix (2026-07-22, same day): contribution
+    = min(rate * weight, cap) -- a hard per-signal ceiling (2.0 publisher/
+    journal, 1.5 country, 10.0 author) so the tail could never dominate. This
+    worked, but the user then proposed something better: since a raw cap
+    still has an arbitrary-feeling ceiling number disconnected from the actual
+    data, MINMAX-SCALE each signal against its own observed worst-in-corpus
+    value instead -- the single worst offender in a category (e.g. an author
+    with an 80% personal retraction rate) scores a fixed target (10 by
+    default, lowered from an initial 20 -- 2026-07-22, same day, user
+    request), and every other entity in that SAME category scores
+    proportionally less (a 20%-rate author scores 10 * 20/80 = 2.5). This
+    folded institution_retr_rate's plain linear weight into the same minmax
+    mechanism too (on request, since it's the same kind of entity-level rate)
+    -- then, later the same day, institution_retr_rate itself was REPLACED by
+    institution_retr_rate_external (OpenAlex works_count via ROR ID as an
+    unambiguous external denominator, no name-search needed) once the user
+    flagged the graph-internal rate as "too high to be intuitive" -- same
+    inflation problem, same fix, as journal_retr_rate_external before it. See
+    minmax_contribution()/compute_corpus_maxes() below and plan.md's
+    2026-07-22 minmax-scoring update for the full rationale, including the
+    one real tradeoff worth knowing: minmax is inherently MORE sensitive to a
+    single new extreme outlier than a fixed cap was -- one future noisy data
+    point becomes the anchor for every other entity's score in that category,
+    not just its own. Checked live before shipping: all five current maxima
+    are backed by reasonably large samples (author 43.5% at n=10/23,
+    publisher 8.4% at n=11,524, journal 31.0% at n=157, country 0.33% at
+    n=2,418; institution_retr_rate_external's max is European Society of
+    Cardiology at 0.101%, n=1/994 -- small numerator but a large denominator,
+    same shape as the other external rates) -- not a fragile single-paper
+    artifact.
+    There is also a conceptual reason these five are treated specially
+    (unrelated to the numeric heavy-tail problem): a journal/publisher/
+    country/institution/author's aggregate rate is evidence about the ENTITY,
+    not about THIS paper -- the same ecological-not-direct category as
+    coauthor_other_misconduct (plan.md §0: same person/place ≠ same
+    responsibility) -- so it should never be able to outrank direct per-paper
+    evidence (an ORI finding, this paper's own AI-text tells) purely on
+    venue/author association. The raw rate is still shown in the evidence
+    text/JSON; only the SCORED contribution is minmax-scaled.
 
-Score = sum of (flag_count * weight) for each sensor, with the three signals
-above additionally capped per-signal (see capped_contribution()).
+Score = sum of (flag_count * weight) for each sensor, with the five signals
+above minmax-scaled per-signal instead (see minmax_contribution()).
 
 Output: CSV with top-N papers sorted by score, including:
   - DOI, title, journal
@@ -219,29 +255,24 @@ DEFAULT_WEIGHTS = {
     "journal_integrity_flag_count": 1.0,
     "ai_text_tell_flag_count": 2.0,
     "p_value_hacking_flag_count": 0.5,
-    "pubmed_eoc_flag": 2.5,
+    "pubmed_eoc_flag": 10.0,
     "pubmed_erratum_flag": 0.3,
     "ori_finding_flag": 4.0,
     # graph features (Neo4j)
     "coauthor_other_misconduct": 1.5,   # per probable-person co-author with a misconduct paper elsewhere
-    "institution_retr_rate": 1.5,       # rate in [0,1]; max across a paper's INVOLVES institutions
-                                         # (see graph_processing/institution_retraction_rate.py)
     "crossref_correction_flag_count": 0.3,  # Crossref-deposited correction notices on this DOI;
                                              # low weight, corrections are often benign (see refresh_correction_history.py)
-    "publisher_retr_rate": 100.0,        # EXTERNAL rate (full RW csv / Crossref total-dois), not graph-scoped
-                                          # (see graph_processing/publisher_retraction_rate.py) -- CAPPED, see below
-    "publisher_retr_rate_cap": 2.0,       # ceiling on this signal's contribution -- see CAPPED_KEYS/capped_contribution()
-    "country_retr_rate": 1000.0,         # EXTERNAL rate (full RW csv / OpenAlex works count), max across countries
-                                          # (see graph_processing/country_retraction_rate.py) -- CAPPED, see below
-    "country_retr_rate_cap": 1.5,        # ceiling on this signal's contribution -- see CAPPED_KEYS/capped_contribution()
-    "journal_retr_rate_external": 100.0, # EXTERNAL rate (full RW csv / Crossref Journals API total-dois), not graph-scoped
-                                          # (see graph_processing/journal_retraction_rate_external.py) -- CAPPED, see below
-    "journal_retr_rate_external_cap": 2.0,  # ceiling on this signal's contribution -- see CAPPED_KEYS/capped_contribution()
-    "author_retr_rate_external": 100.0,  # a first/last author's OWN retraction RATE (ORCID claimed-works
-                                          # denominator, RW-by-DOI numerator; see graph_processing/author_
-                                          # retraction_rate_external.py) -- same weight/cap idiom as
-                                          # publisher_retr_rate/journal_retr_rate_external. CAPPED, see below.
-    "author_retr_rate_external_cap": 10.0,  # ceiling on this signal's contribution -- see CAPPED_KEYS/capped_contribution()
+    # The five entity-level retraction-RATE signals below are all MINMAX-SCALED
+    # against their own observed worst-in-corpus value (see minmax_contribution()
+    # / MINMAX_KEYS below), not multiplied by a raw weight -- these "_minmax_target"
+    # values are each signal's target score for the single worst offender in its
+    # category; every other entity in the same category scores proportionally
+    # less. Replaces the old weight+cap idiom entirely (2026-07-22, user request).
+    "institution_retr_rate_minmax_target": 10.0,       # EXTERNAL rate (graph_processing/institution_retraction_rate.py)
+    "publisher_retr_rate_minmax_target": 10.0,         # EXTERNAL rate (graph_processing/publisher_retraction_rate.py)
+    "country_retr_rate_minmax_target": 10.0,           # EXTERNAL rate (graph_processing/country_retraction_rate.py)
+    "journal_retr_rate_external_minmax_target": 10.0,  # EXTERNAL rate (graph_processing/journal_retraction_rate_external.py)
+    "author_retr_rate_external_minmax_target": 10.0,   # first/last author's own rate (graph_processing/author_retraction_rate_external.py)
     # paperconan (filesystem, not the graph — see load_paperconan_runs() above)
     "paperconan_needs_human": 2.0,      # an opened, quantified anomaly that survived adjudication
     "paperconan_confirmed": 4.0,        # tied with ori_finding_flag as the strongest signal here
@@ -276,28 +307,55 @@ def load_weights(path: Path = WEIGHTS_CONFIG_PATH) -> dict:
 
 WEIGHTS = load_weights()
 
-# Which WEIGHTS keys are capped, and the WEIGHTS key holding their ceiling --
-# see the "publisher_retr_rate / country_retr_rate / journal_retr_rate_external
-# are CAPPED" docstring note above for why. build_review_page.py and
-# flag_evidence_report.py both import capped_contribution() (not just WEIGHTS)
+# Which raw-rate keys are minmax-scored, and the WEIGHTS key holding each
+# one's target score for the worst-in-corpus entity -- see the "MINMAX-SCORED"
+# docstring note above for why. build_review_page.py and flag_evidence_report.py
+# both import minmax_contribution()/compute_corpus_maxes() (not just WEIGHTS)
 # so the displayed per-row score always matches what's actually summed here.
-CAPPED_KEYS = {
-    "publisher_retr_rate": "publisher_retr_rate_cap",
-    "country_retr_rate": "country_retr_rate_cap",
-    "journal_retr_rate_external": "journal_retr_rate_external_cap",
-    "author_retr_rate_external": "author_retr_rate_external_cap",
+MINMAX_KEYS = {
+    "institution_retr_rate_external": "institution_retr_rate_minmax_target",
+    "publisher_retr_rate": "publisher_retr_rate_minmax_target",
+    "country_retr_rate": "country_retr_rate_minmax_target",
+    "journal_retr_rate_external": "journal_retr_rate_external_minmax_target",
+    "author_retr_rate_external": "author_retr_rate_external_minmax_target",
 }
 
+# Populated once per run by compute_corpus_maxes(), BEFORE any row is scored --
+# read by minmax_contribution(). Must be computed from the FULL not-yet-retracted
+# candidate population, never a --top-sliced subset, or the worst-in-corpus
+# anchor would shift depending on an unrelated CLI flag.
+CORPUS_MAXES: dict[str, float] = {}
 
-def capped_contribution(key: str, rate: float) -> float:
-    """rate * WEIGHTS[key], ceilinged at WEIGHTS[CAPPED_KEYS[key]] for the
-    four heavy-tailed rate signals in CAPPED_KEYS (publisher/country/journal/
-    author retraction rates)."""
-    contrib = rate * WEIGHTS[key]
-    cap_key = CAPPED_KEYS.get(key)
-    if cap_key:
-        return min(contrib, WEIGHTS[cap_key])
-    return contrib
+
+def compute_corpus_maxes(rows: list[dict]) -> dict[str, float]:
+    """Observed worst-in-corpus value for each MINMAX_KEYS entry, across every
+    row passed in. Call once per script run with the full candidate list,
+    before scoring/sorting/slicing any of it."""
+    global CORPUS_MAXES
+    CORPUS_MAXES = {key: max((row.get(key) or 0.0) for row in rows) for key in MINMAX_KEYS}
+    return CORPUS_MAXES
+
+
+def get_corpus_max(key: str) -> float:
+    """Current worst-in-corpus value for a MINMAX_KEYS entry, as of the last
+    compute_corpus_maxes() call. Callers in other modules should use this
+    (not a direct `from tier_a_scoring import CORPUS_MAXES`) -- a plain import
+    binds a snapshot at import time and won't see later compute_corpus_maxes()
+    updates, since that reassigns the name rather than mutating it in place."""
+    return CORPUS_MAXES.get(key, 0.0)
+
+
+def minmax_contribution(key: str, rate: float) -> float:
+    """(rate / worst-in-corpus-for-this-key) * WEIGHTS[MINMAX_KEYS[key]] --
+    the single worst offender in this category scores WEIGHTS[MINMAX_KEYS[key]]
+    (10 by default), every other entity in the same category scores
+    proportionally less. Requires compute_corpus_maxes(rows) to have already
+    been called this run. NOTE: more sensitive to a single new extreme outlier
+    than a fixed cap was -- see the module docstring's MINMAX-SCORED note."""
+    corpus_max = CORPUS_MAXES.get(key, 0.0)
+    if corpus_max <= 0:
+        return 0.0
+    return (rate / corpus_max) * WEIGHTS[MINMAX_KEYS[key]]
 
 
 # Rank ALL not-yet-retracted candidates. Nearly every one has some graph signal
@@ -327,6 +385,10 @@ RETURN p.doi AS doi,
        coalesce(p.institution_retr_rate, 0.0) AS institution_retr_rate,
        p.institution_retr_rate_name AS institution_retr_rate_name,
        p.institution_retr_rate_n AS institution_retr_rate_n,
+       coalesce(p.institution_retr_rate_external, 0.0) AS institution_retr_rate_external,
+       p.institution_retr_rate_external_name AS institution_retr_rate_external_name,
+       p.institution_retr_rate_external_n AS institution_retr_rate_external_n,
+       p.institution_retr_rate_external_total AS institution_retr_rate_external_total,
        coalesce(p.publisher_retr_rate, 0.0) AS publisher_retr_rate,
        p.publisher_retr_rate_name AS publisher_retr_rate_name,
        p.publisher_retr_rate_n AS publisher_retr_rate_n,
@@ -366,11 +428,11 @@ def calculate_score(row: dict) -> float:
         row["erratum_flag"] * WEIGHTS["pubmed_erratum_flag"] +
         row["ori_flag"] * WEIGHTS["ori_finding_flag"] +
         row["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"] +
-        row["institution_retr_rate"] * WEIGHTS["institution_retr_rate"] +
-        capped_contribution("publisher_retr_rate", row["publisher_retr_rate"]) +
-        capped_contribution("country_retr_rate", row["country_retr_rate"]) +
-        capped_contribution("journal_retr_rate_external", row["journal_retr_rate_external"]) +
-        capped_contribution("author_retr_rate_external", row["author_retr_rate_external"]) +
+        minmax_contribution("institution_retr_rate_external", row["institution_retr_rate_external"]) +
+        minmax_contribution("publisher_retr_rate", row["publisher_retr_rate"]) +
+        minmax_contribution("country_retr_rate", row["country_retr_rate"]) +
+        minmax_contribution("journal_retr_rate_external", row["journal_retr_rate_external"]) +
+        minmax_contribution("author_retr_rate_external", row["author_retr_rate_external"]) +
         row["correction_count"] * WEIGHTS["crossref_correction_flag_count"] +
         (WEIGHTS["paperconan_needs_human"] if adj == "needs_human" else 0.0) +
         (WEIGHTS["paperconan_confirmed"] if adj == "confirmed" else 0.0)
@@ -391,6 +453,7 @@ def main() -> None:
         rows = [dict(r) for r in s.run(QUERY)]
     driver.close()
 
+    compute_corpus_maxes(rows)
     paperconan_runs = load_paperconan_runs()
 
     # Calculate scores
@@ -427,6 +490,8 @@ def main() -> None:
             "coauthor_misconduct": row["coauthor_misconduct"],
             "institution_retr_rate": round(row["institution_retr_rate"], 3),
             "institution_retr_rate_name": row["institution_retr_rate_name"] or "",
+            "institution_retr_rate_external": round(row["institution_retr_rate_external"], 5),
+            "institution_retr_rate_external_name": row["institution_retr_rate_external_name"] or "",
             "publisher_retr_rate": round(row["publisher_retr_rate"], 5),
             "publisher_retr_rate_name": row["publisher_retr_rate_name"] or "",
             "country_retr_rate": round(row["country_retr_rate"], 5),
@@ -479,6 +544,8 @@ def main() -> None:
         "coauthor_misconduct",
         "institution_retr_rate",
         "institution_retr_rate_name",
+        "institution_retr_rate_external",
+        "institution_retr_rate_external_name",
         "publisher_retr_rate",
         "publisher_retr_rate_name",
         "country_retr_rate",
@@ -540,7 +607,7 @@ def main() -> None:
               f"ref{r['reference_integrity_count']} "
               f"jrnl{r['journal_integrity_count']} ai{r['ai_text_tell_count']} "
               f"coauthor-misconduct{r['coauthor_misconduct']} "
-              f"irr{r['institution_retr_rate']} prr{r['publisher_retr_rate']} crr{r['country_retr_rate']} "
+              f"irr_ext{r['institution_retr_rate_external']} prr{r['publisher_retr_rate']} crr{r['country_retr_rate']} "
               f"jre{r['journal_retr_rate_external']} are_n{r['author_retr_rate_external_n']} "
               f"corr{r['correction_count']}{gds}", file=sys.stderr)
         print(f"     {r['doi']} ({r['journal']})", file=sys.stderr)

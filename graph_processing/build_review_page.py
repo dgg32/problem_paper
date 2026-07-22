@@ -15,7 +15,7 @@ It mirrors tier_a_scoring.py's ranking exactly (same WEIGHTS), and for each
 top-N candidate expands every contributing signal into named, sourced
 evidence -- including the two signals added 2026-07-19 that the older
 flag_evidence_report.py predates:
-  - Expression of Concern (pubmed_eoc_*, weight 2.5) with date + notice DOI
+  - Expression of Concern (pubmed_eoc_*, weight 10.0) with date + notice DOI
   - PubPeer comment count + category breakdown + author-response note
     (from data/flags/pubpeer_comment_categories.json), shown as review
     context but NOT scored (comment count = attention, not guilt).
@@ -102,7 +102,9 @@ def flag_gauge(sc: float) -> int:
 # Single source of truth — imported, not copied, so the two can never drift
 # (was three hand-synced copies; see #7 in BUG.md). tier_a_scoring only touches
 # the DB inside main(), so importing the module is side-effect-free.
-from tier_a_scoring import WEIGHTS, load_paperconan_runs, capped_contribution, CAPPED_KEYS  # noqa: E402
+from tier_a_scoring import (  # noqa: E402
+    WEIGHTS, load_paperconan_runs, minmax_contribution, compute_corpus_maxes, get_corpus_max, MINMAX_KEYS,
+)
 
 # Same broad misconduct-signal set as flag_evidence_report.py / gds.
 MISCONDUCT_REASONS = [
@@ -133,6 +135,10 @@ RETURN p.doi AS doi, p.title AS title, j.name AS journal,
        coalesce(p.institution_retr_rate, 0.0) AS institution_retr_rate,
        p.institution_retr_rate_name AS institution_retr_rate_name,
        p.institution_retr_rate_n AS institution_retr_rate_n,
+       coalesce(p.institution_retr_rate_external, 0.0) AS institution_retr_rate_external,
+       p.institution_retr_rate_external_name AS institution_retr_rate_external_name,
+       p.institution_retr_rate_external_n AS institution_retr_rate_external_n,
+       p.institution_retr_rate_external_total AS institution_retr_rate_external_total,
        p.institution_global_retraction_count AS institution_global_retraction_count,
        p.institution_global_retraction_count_name AS institution_global_retraction_count_name,
        coalesce(p.journal_hijack_flag, false) AS journal_hijack_flag,
@@ -186,6 +192,24 @@ RETURN coauthor_name, example_dois, reasons ORDER BY coauthor_name LIMIT 6
 """
 
 
+# The five entity-level (ecological, not direct-evidence) minmax signals --
+# broken out as their own function so build_review_page.py can offer an
+# "exclude these from score" toggle (2026-07-22, user request, prompted by
+# the same session's minmax-target discussion: the worst-in-corpus offender
+# in any of these 5 can still outscore a single direct-evidence signal like
+# an ORI finding, so a reviewer may want to see the ranking with vs. without
+# them to judge how much of a paper's score rests on entity association
+# rather than its own conduct).
+def minmax_total(r: dict) -> float:
+    return (
+        minmax_contribution("institution_retr_rate_external", r["institution_retr_rate_external"])
+        + minmax_contribution("publisher_retr_rate", r["publisher_retr_rate"])
+        + minmax_contribution("country_retr_rate", r["country_retr_rate"])
+        + minmax_contribution("journal_retr_rate_external", r["journal_retr_rate_external"])
+        + minmax_contribution("author_retr_rate_external", r["author_retr_rate_external"])
+    )
+
+
 def score(r: dict) -> float:
     adj = r.get("paperconan_adjudication")
     return (
@@ -199,11 +223,7 @@ def score(r: dict) -> float:
         + r["erratum_flag"] * WEIGHTS["pubmed_erratum_flag"]
         + r["ori_flag"] * WEIGHTS["ori_finding_flag"]
         + r["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"]
-        + r["institution_retr_rate"] * WEIGHTS["institution_retr_rate"]
-        + capped_contribution("publisher_retr_rate", r["publisher_retr_rate"])
-        + capped_contribution("country_retr_rate", r["country_retr_rate"])
-        + capped_contribution("journal_retr_rate_external", r["journal_retr_rate_external"])
-        + capped_contribution("author_retr_rate_external", r["author_retr_rate_external"])
+        + minmax_total(r)
         + r["correction_count"] * WEIGHTS["crossref_correction_flag_count"]
         + (WEIGHTS["paperconan_needs_human"] if adj == "needs_human" else 0.0)
         + (WEIGHTS["paperconan_confirmed"] if adj == "confirmed" else 0.0)
@@ -369,9 +389,13 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             f'Co-author of misconduct work ({r["coauthor_misconduct"]} co-author(s))',
             r["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"],
             f'<ul>{names}</ul>',
-            help='Same person ≠ same responsibility (§0). This means a co-author shares a cluster with '
+            help='Same person ≠ same responsibility. This means a co-author shares a cluster with '
                  'someone who wrote a paper retracted for a misconduct-signal reason — not a formal finding about '
-                 'this paper or this person. Author role varies paper to paper.',
+                 'this paper or this person. Author role varies paper to paper. '
+                 'Different from "Author retraction rate" below: this counts ANY co-author (not just first/last), '
+                 'matched via a fuzzier probable-person cluster (not strict ORCID), and only counts '
+                 'misconduct-REASON retractions found elsewhere IN THIS GRAPH — not an external, all-cause, '
+                 'ORCID-verified rate.',
         ))
 
     if r["ret_count"] > 0:
@@ -449,68 +473,70 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
                  "continuous) -- so the same +1.00 score can mean quite different things paper to paper.",
         ))
 
-    def capped_note(key: str, rate: float) -> str | None:
-        """None if this row's contribution isn't capped, else a note for the
-        help popover explaining that it hit its ceiling -- see plan.md's
-        2026-07-22 caps update (capped_contribution() in tier_a_scoring.py):
-        these signals are heavy-tailed enough that an uncapped linear weight
-        let a single infamous venue/repeat-offender author outrank direct
-        per-paper evidence on its own."""
-        contrib = capped_contribution(key, rate)
-        raw = rate * WEIGHTS[key]
-        if contrib < raw:
-            cap = WEIGHTS[CAPPED_KEYS[key]]
-            return f'Contribution capped at {cap} -- see plan.md\'s 2026-07-22 caps update for why.'
-        return None
+    def minmax_note(key: str) -> str:
+        """Help-popover text explaining the minmax scaling for one of the five
+        entity-level retraction-rate rows -- see plan.md's 2026-07-22 minmax-
+        scoring update (minmax_contribution() in tier_a_scoring.py): the worst
+        offender in this category anchors the top of the scale (its target
+        score), everyone else scores proportionally less."""
+        target = WEIGHTS[MINMAX_KEYS[key]]
+        corpus_max = get_corpus_max(key)
+        return (f'Minmax-scaled: the worst-in-corpus value for this signal ({corpus_max:.3%}) scores '
+                f'{target:g}; this row scores proportionally less.')
 
     if r["journal_retr_rate_external"] > 0:
         parts.append(row(
             "📔 Journal retraction rate (external)",
-            capped_contribution("journal_retr_rate_external", r["journal_retr_rate_external"]),
+            minmax_contribution("journal_retr_rate_external", r["journal_retr_rate_external"]),
             f'{esc(r["journal"])} has a real-world {r["journal_retr_rate_external"]:.3%} retraction rate '
             f'(Retraction Watch / Crossref Journals API, n={r["journal_retr_rate_external_n"]}).',
-            help=capped_note("journal_retr_rate_external", r["journal_retr_rate_external"]),
+            help=minmax_note("journal_retr_rate_external"),
         ))
 
     if r["publisher_retr_rate"] > 0:
         parts.append(row(
             "📇 Publisher retraction rate (external)",
-            capped_contribution("publisher_retr_rate", r["publisher_retr_rate"]),
+            minmax_contribution("publisher_retr_rate", r["publisher_retr_rate"]),
             f'{esc(r["publisher_retr_rate_name"])} has a real-world {r["publisher_retr_rate"]:.3%} retraction rate '
             f'(Retraction Watch / Crossref, n={r["publisher_retr_rate_n"]}).',
-            help=capped_note("publisher_retr_rate", r["publisher_retr_rate"]),
+            help=minmax_note("publisher_retr_rate"),
         ))
 
-    if r["institution_retr_rate"] > 0:
+    if r["institution_retr_rate_external"] > 0:
         parts.append(row(
-            "🏛️ Institution retraction rate",
-            r["institution_retr_rate"] * WEIGHTS["institution_retr_rate"],
-            f'{esc(r["institution_retr_rate_name"])} has a measured {r["institution_retr_rate"]:.1%} '
-            f'retraction rate in this graph (n={r["institution_retr_rate_n"]} papers).',
+            "🏛️ Institution retraction rate (external)",
+            minmax_contribution("institution_retr_rate_external", r["institution_retr_rate_external"]),
+            f'{esc(r["institution_retr_rate_external_name"])} has a real-world '
+            f'{r["institution_retr_rate_external"]:.3%} retraction rate '
+            f'(Retraction Watch / OpenAlex via ROR, '
+            f'n={r["institution_retr_rate_external_n"]}/{r["institution_retr_rate_external_total"]}).',
+            help=minmax_note("institution_retr_rate_external"),
         ))
 
     if r["country_retr_rate"] > 0:
         parts.append(row(
             "🏳️‍🌈 Country retraction rate (external)",
-            capped_contribution("country_retr_rate", r["country_retr_rate"]),
+            minmax_contribution("country_retr_rate", r["country_retr_rate"]),
             f'{esc(r["country_retr_rate_name"])} has a real-world {r["country_retr_rate"]:.3%} retraction rate '
             f'(Retraction Watch / OpenAlex, n={r["country_retr_rate_n"]}).',
-            help=capped_note("country_retr_rate", r["country_retr_rate"]),
+            help=minmax_note("country_retr_rate"),
         ))
 
     if r["author_retr_rate_external_n"] > 0:
         author_help = (
             'Retracted per Retraction Watch, matched by DOI against this specific person\'s own ORCID '
             'record -- no name-matching involved. Restricted to first/last authors only (the ones '
-            'conventionally responsible for the work). Still ecological, not direct (§0): this is their '
-            'track record across ALL their claimed work, not a finding about this paper specifically.'
+            'conventionally responsible for the work). This is their track record across ALL their claimed '
+            'work, not a finding about this paper specifically. '
+            'Different from "Co-author of misconduct work" above: this is restricted to the first/last '
+            'author specifically, matched by strict ORCID (not a fuzzy cluster), and counts ANY retraction '
+            'reason in the full external Retraction Watch database -- not just misconduct-specific reasons '
+            'found in this graph. '
+            + minmax_note("author_retr_rate_external")
         )
-        author_cap_note = capped_note("author_retr_rate_external", r["author_retr_rate_external"])
-        if author_cap_note:
-            author_help += " " + author_cap_note
         parts.append(row(
             f'👤 Author retraction rate — {esc(r["author_retr_rate_external_position"])} author (external)',
-            capped_contribution("author_retr_rate_external", r["author_retr_rate_external"]),
+            minmax_contribution("author_retr_rate_external", r["author_retr_rate_external"]),
             f'{r["author_retr_rate_external_n"]} out of {esc(r["author_retr_rate_external_name"])}\'s '
             f'{r["author_retr_rate_external_total"]} ORCID-claimed works were retracted '
             f'({r["author_retr_rate_external"]:.1%}).',
@@ -582,6 +608,14 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             f'<div class="ctx"><span class="ctx-t">GDS prior</span> {r["gds_prob"]:.3f} '
             '<span class="muted">— weak/capped/domain-shifted learned prior, labelled only, never scored.</span></div>'
         )
+    if r["institution_retr_rate"] > 0:
+        ctx.append(
+            f'<div class="ctx"><span class="ctx-t">Institution retraction rate (in-graph)</span> '
+            f'{esc(r["institution_retr_rate_name"])}: {r["institution_retr_rate"]:.1%} '
+            f'<span class="muted">(n={r["institution_retr_rate_n"]} papers in this graph only -- runs inflated '
+            'since this graph is itself retraction-seeded; institution_retr_rate_external above uses OpenAlex\'s '
+            'full works_count and is the scored signal. Context only, never scored.)</span></div>'
+        )
     if r["institution_global_retraction_count"]:
         ctx.append(
             f'<div class="ctx"><span class="ctx-t">Institution — global retraction count</span> '
@@ -613,7 +647,7 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             f'👤 {esc(r["known_miller_coauthor_name"])}</a><br>'
             '<span class="muted">named in investigative reporting as a paper-mill participant. '
             'Guilt by co-authorship with a documented bad actor is associative, not a finding about '
-            'this paper\'s own conduct (§0). Context only, never scored.</span></div>'
+            'this paper\'s own conduct. Context only, never scored.</span></div>'
         )
     if r["cabanac_chatgpt_flag"]:
         pp_url = r["cabanac_chatgpt_pubpeer_url"]
@@ -703,6 +737,7 @@ def main() -> None:
     driver = GraphDatabase.driver(conn["uri"], auth=(conn["user"], conn["password"]))
     with driver.session(database=conn["database"]) as s:
         rows = [dict(r) for r in s.run(QUERY)]
+        compute_corpus_maxes(rows)
         for r in rows:
             pc = pc_runs.get(r["doi"])
             r["paperconan_adjudication"] = pc.get("adjudicated") if pc else None
@@ -770,7 +805,7 @@ def main() -> None:
             for t in tags:
                 tag_counts[t] = tag_counts.get(t, 0) + 1
             cards.append(f'''
-    <article class="card" data-score="{sc:.2f}" data-rank="{rank}" data-doi="{esc(r['doi'])}" data-tags="{' '.join(tags)}">
+    <article class="card" data-score="{sc:.2f}" data-score-nominmax="{sc - minmax_total(r):.2f}" data-rank="{rank}" data-doi="{esc(r['doi'])}" data-tags="{' '.join(tags)}">
       <div class="card-h" onclick="this.parentElement.classList.toggle('open')">
         <div class="rank">#{rank}</div>
         <div class="score" title="{flag_gauge(sc)} of 5 review-priority flags · weighted Tier-A score {sc:.1f}">
@@ -915,6 +950,15 @@ PAGE_TEMPLATE = """<!doctype html>
   .chip.active .chip-n {{ opacity:.85; }}
   .filterbar {{ max-width:960px; margin:6px auto 0; padding:0 20px; font-size:.82rem; color:var(--muted); display:flex; gap:12px; align-items:center; }}
   #clear {{ background:none; border:none; color:var(--pp); cursor:pointer; font-size:.82rem; padding:0; display:none; }}
+  .minmax-toggle {{ display:inline-flex; align-items:center; gap:8px; cursor:pointer; color:var(--fg); font-size:.82rem; }}
+  .switch {{ position:relative; display:inline-block; width:34px; height:20px; flex-shrink:0; }}
+  .switch input {{ position:absolute; opacity:0; width:0; height:0; margin:0; cursor:pointer; }}
+  .switch-track {{ position:absolute; inset:0; background:var(--line); border-radius:20px; transition:background .15s ease; }}
+  .switch-track::before {{ content:''; position:absolute; width:16px; height:16px; left:2px; top:2px;
+    background:#fff; border-radius:50%; transition:transform .15s ease; box-shadow:0 1px 2px rgba(0,0,0,.3); }}
+  .switch input:checked + .switch-track {{ background:var(--accent); }}
+  .switch input:checked + .switch-track::before {{ transform:translateX(14px); }}
+  .switch input:focus-visible + .switch-track {{ outline:2px solid var(--accent); outline-offset:2px; }}
   .pager {{ max-width:960px; margin:16px auto; padding:0 20px; display:flex; gap:10px; align-items:center; justify-content:center; font-size:.86rem; color:var(--muted); }}
   .pager button {{ padding:6px 14px; border:1px solid var(--line); border-radius:7px; background:var(--card); color:var(--fg); cursor:pointer; font-size:.85rem; }}
   .pager button:disabled {{ opacity:.4; cursor:default; }}
@@ -962,6 +1006,19 @@ PAGE_TEMPLATE = """<!doctype html>
   <span id="shown"></span>
   <button id="clear" onclick="clearTags()">clear filters ✕</button>
   <span class="muted">tags combine with AND — a paper must carry every selected tag</span>
+</div>
+<div class="filterbar">
+  <label class="minmax-toggle">
+    <span class="switch">
+      <input type="checkbox" id="includeMinmax" checked onchange="toggleMinmax(this.checked)">
+      <span class="switch-track"></span>
+    </span>
+    include author/institution/publisher/country/journal retraction-rate signals in score
+  </label>
+  <span class="help-wrap">
+    <button class="help-btn" type="button" aria-label="More context">!</button>
+    <span class="help-pop">turn off to re-rank live with those 5 signals zeroed out — compares how much rests on entity association vs. direct evidence</span>
+  </span>
 </div>
 <div class="pager" id="pagerTop">
   <button id="prevTop" onclick="gotoPage(page-1)">← prev</button>
@@ -1071,6 +1128,47 @@ PAGE_TEMPLATE = """<!doctype html>
     document.querySelectorAll('.chip.active').forEach(b => b.classList.remove('active'));
     document.getElementById('countrySelect').value = '';
     document.getElementById('clear').style.display = 'none';
+    applyFilters();
+  }}
+
+  // "Include ecological signals" toggle: ON (default, matches the page's
+  // baked-in build-time order) uses each card's data-score; OFF uses
+  // data-score-nominmax (score minus the 5 minmax_contribution() terms) --
+  // re-sorts + re-displays live. Mirrors the exact FLAG_BANDS thresholds from
+  // flag_gauge() in build_review_page.py so the 🚩 gauge stays consistent
+  // with whichever score is currently active.
+  const listContainer = document.getElementById('list');
+  let includeMinmax = true;
+
+  function activeScore(c) {{
+    return parseFloat(includeMinmax ? c.dataset.score : c.dataset.scoreNominmax);
+  }}
+  function gaugeFlags(sc) {{
+    if (sc >= 12) return 5;
+    if (sc >= 9) return 4;
+    if (sc >= 6) return 3;
+    if (sc >= 3) return 2;
+    if (sc > 0.0001) return 1;
+    return 0;
+  }}
+  function updateCardDisplays() {{
+    cards.forEach((c, i) => {{
+      const sc = activeScore(c);
+      const rank = i + 1;
+      const flags = gaugeFlags(sc);
+      c.dataset.rank = rank;
+      c.querySelector('.rank').textContent = '#' + rank;
+      c.querySelector('.gauge').textContent = '🚩'.repeat(flags);
+      c.querySelector('.gauge').setAttribute('aria-label', flags + ' of 5 priority flags');
+      c.querySelector('.score-num').textContent = sc.toFixed(1);
+      c.querySelector('.score').title = flags + ' of 5 review-priority flags · weighted Tier-A score ' + sc.toFixed(1);
+    }});
+  }}
+  function toggleMinmax(checked) {{
+    includeMinmax = checked;
+    cards.sort((a, b) => activeScore(b) - activeScore(a));
+    listContainer.append(...cards);
+    updateCardDisplays();
     applyFilters();
   }}
 

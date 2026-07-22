@@ -36,6 +36,28 @@ publisher/country external-rate discussion in skill_worth_exploring.md): how
 many retractions in the FULL retraction_watch.csv (71,106 records, all
 subjects -- NOT filtered to data.seed_subset) name this institution, at all.
 
+ALSO computes institution_retr_rate_external (added 2026-07-22, later the same
+day -- user feedback: the graph-internal institution_retr_rate above is
+"correct" but "too high to be intuitive," the same inflation problem already
+fixed for journal_retr_rate by building journal_retr_rate_external). Unlike
+publisher/country/journal, this one needs NO name-matching/search step at all:
+every Institution node already carries a ROR ID (`institution_id`, e.g.
+"https://ror.org/000ed3w25") from OpenAlex at ingest time, confirmed 2026-07-22
+at 100% coverage (2992/2992) -- and OpenAlex supports direct ROR lookup
+(`GET /institutions/ror:<id>`), returning `works_count` unambiguously. So:
+  numerator   = global_retraction_count above (exact-match count against the
+                FULL csv -- same conservative, partial-coverage caveat)
+  denominator = that institution's OpenAlex works_count via its own ROR ID
+Only institutions with global_retraction_count > 0 are looked up (a zero
+numerator means rate=0 regardless of denominator, so this keeps the API calls
+down to ~130 institutions, not 2992). This REPLACES institution_retr_rate in
+Tier-A scoring (see tier_a_scoring.py's WEIGHTS comment) -- same fate as the
+graph-internal journal_retr_rate before it: institution_retr_rate and
+global_retraction_count both stay as unscored review-card context (rate in
+[0,1] is still useful to see, just not safe to score at graph-internal scale),
+institution_retr_rate_external is the real, non-redundant, minmax-scored
+replacement.
+
 IMPORTANT, checked empirically 2026-07-22 (do not assume otherwise):
 `Institution.name` in this graph is NOT the csv's raw Institution-column text
 -- it is OpenAlex's canonical institution name (build_instances.py /
@@ -81,8 +103,10 @@ from __future__ import annotations
 
 import csv
 import sys
+import time
 from pathlib import Path
 
+import requests
 import yaml
 from neo4j import GraphDatabase
 
@@ -93,6 +117,34 @@ from normalize_authors import resolve_connection  # noqa: E402
 CONFIG_PATH = REPO_ROOT / ".env.yaml"
 cfg = yaml.safe_load(CONFIG_PATH.read_text())
 RW_CSV_PATH = (REPO_ROOT / cfg["data"]["retraction_watch_csv"]).resolve()
+OPENALEX = cfg["openalex"]
+
+
+def ror_to_openalex_id(ror_url: str) -> str | None:
+    """"https://ror.org/000ed3w25" -> "ror:000ed3w25" (OpenAlex's accepted
+    ID form for direct institution lookup, no name search needed)."""
+    if not ror_url:
+        return None
+    tail = ror_url.rstrip("/").rsplit("/", 1)[-1]
+    return f"ror:{tail}" if tail else None
+
+
+def openalex_institution_works_count(ror_url: str) -> int | None:
+    """OpenAlex's own works_count for this ROR-identified institution, or
+    None if the ROR isn't resolvable there (rare, e.g. a very new/obscure
+    institution) or the request fails."""
+    oaid = ror_to_openalex_id(ror_url)
+    if not oaid:
+        return None
+    try:
+        r = requests.get(f"{OPENALEX['base_url']}/institutions/{oaid}",
+                          params={"mailto": OPENALEX.get("mailto", "")}, timeout=15)
+        if r.status_code == 404:
+            return None
+        r.raise_for_status()
+        return r.json().get("works_count")
+    except (requests.RequestException, ValueError):
+        return None
 
 
 def load_global_institution_counts() -> dict[str, int]:
@@ -145,6 +197,48 @@ def main() -> None:
                   f"(left at 0 -- see module docstring; should be rare since this graph's Institution.name "
                   f"values come directly from the same csv column)", file=sys.stderr)
 
+        print("[institution_retraction_rate] external rate (OpenAlex works_count via ROR)...", file=sys.stderr)
+        to_lookup = [
+            r for r in s.run(
+                "MATCH (i:Institution) WHERE i.global_retraction_count > 0 "
+                "RETURN i.name AS name, i.institution_id AS ror, i.global_retraction_count AS n"
+            )
+        ]
+        print(f"  {len(to_lookup)} institutions with a nonzero global count -- looking up works_count for these only "
+              f"(a zero numerator means rate=0 regardless of denominator)", file=sys.stderr)
+        rps = OPENALEX.get("requests_per_second", 10)
+        min_interval = 1.0 / rps
+        last_call = 0.0
+        external_results = []
+        no_ror_hit = 0
+        for i, row in enumerate(to_lookup, 1):
+            wait = min_interval - (time.time() - last_call)
+            if wait > 0:
+                time.sleep(wait)
+            last_call = time.time()
+            works_count = openalex_institution_works_count(row["ror"])
+            if not works_count:
+                no_ror_hit += 1
+                continue
+            external_results.append({
+                "name": row["name"], "n": row["n"], "total": works_count,
+                "rate": row["n"] / works_count,
+            })
+            if i % 20 == 0:
+                print(f"  [{i}/{len(to_lookup)}]", file=sys.stderr)
+        for r in external_results:
+            s.run(
+                "MATCH (i:Institution {name: $name}) "
+                "SET i.retraction_rate_external = $rate, "
+                "    i.retraction_rate_external_n = $n, "
+                "    i.retraction_rate_external_total = $total",
+                name=r["name"], rate=r["rate"], n=r["n"], total=r["total"],
+            )
+        if no_ror_hit:
+            print(f"  {no_ror_hit}/{len(to_lookup)} institutions' ROR wasn't resolvable at OpenAlex "
+                  f"(left with no external rate; institution_retr_rate/global_retraction_count context "
+                  f"still shown either way)", file=sys.stderr)
+
         print("[institution_retraction_rate] per-paper max across involved institutions...", file=sys.stderr)
         s.run(
             """
@@ -153,7 +247,11 @@ def main() -> None:
                 p.institution_retr_rate_name = null,
                 p.institution_retr_rate_n = null,
                 p.institution_global_retraction_count = null,
-                p.institution_global_retraction_count_name = null
+                p.institution_global_retraction_count_name = null,
+                p.institution_retr_rate_external = 0.0,
+                p.institution_retr_rate_external_name = null,
+                p.institution_retr_rate_external_n = null,
+                p.institution_retr_rate_external_total = null
             """
         ).consume()
         s.run(
@@ -176,6 +274,19 @@ def main() -> None:
                 p.institution_global_retraction_count_name = top.name
             """
         ).consume()
+        s.run(
+            """
+            MATCH (p:Paper)-[:INVOLVES]->(i:Institution)
+            WHERE i.retraction_rate_external IS NOT NULL
+            WITH p, i ORDER BY i.retraction_rate_external DESC
+            WITH p, collect({name: i.name, rate: i.retraction_rate_external,
+                              n: i.retraction_rate_external_n, total: i.retraction_rate_external_total})[0] AS top
+            SET p.institution_retr_rate_external = top.rate,
+                p.institution_retr_rate_external_name = top.name,
+                p.institution_retr_rate_external_n = top.n,
+                p.institution_retr_rate_external_total = top.total
+            """
+        ).consume()
 
         top_institutions = s.run(
             """
@@ -191,7 +302,8 @@ def main() -> None:
             RETURN count(*) AS n,
                    sum(CASE WHEN p.institution_retr_rate > 0 THEN 1 ELSE 0 END) AS with_signal,
                    avg(p.institution_retr_rate) AS avg_rate,
-                   sum(CASE WHEN p.institution_global_retraction_count > 0 THEN 1 ELSE 0 END) AS with_global_count
+                   sum(CASE WHEN p.institution_global_retraction_count > 0 THEN 1 ELSE 0 END) AS with_global_count,
+                   sum(CASE WHEN p.institution_retr_rate_external > 0 THEN 1 ELSE 0 END) AS with_external
             """
         ).single()
 
@@ -203,19 +315,33 @@ def main() -> None:
             """
         ).data()
 
+        top_external = s.run(
+            """
+            MATCH (i:Institution) WHERE i.retraction_rate_external IS NOT NULL
+            RETURN i.name AS name, i.country AS country, i.retraction_rate_external AS rate,
+                   i.retraction_rate_external_n AS n, i.retraction_rate_external_total AS total
+            ORDER BY rate DESC LIMIT 15
+            """
+        ).data()
+
     driver.close()
 
     print("\n=== Institution retraction rate — verification ===", file=sys.stderr)
-    print(f"Not-yet-retracted candidates with a nonzero institution_retr_rate: "
+    print(f"Not-yet-retracted candidates with a nonzero institution_retr_rate (graph-internal, unscored context): "
           f"{dist['with_signal']} / {dist['n']}  (avg {dist['avg_rate']:.3f})", file=sys.stderr)
-    print(f"Not-yet-retracted candidates with a nonzero institution_global_retraction_count: "
+    print(f"Not-yet-retracted candidates with a nonzero institution_global_retraction_count (unscored context): "
           f"{dist['with_global_count']} / {dist['n']}", file=sys.stderr)
-    print("\nTop institutions by retraction rate (paper_count >= 3, so not single-paper noise):", file=sys.stderr)
+    print(f"Not-yet-retracted candidates with a nonzero institution_retr_rate_external (SCORED): "
+          f"{dist['with_external']} / {dist['n']}", file=sys.stderr)
+    print("\nTop institutions by graph-internal retraction rate (paper_count >= 3, unscored context):", file=sys.stderr)
     for row in top_institutions:
         print(f"  {row['rate']:.1%}  n={row['n']:<4} {row['name']} ({row['country'] or '?'})", file=sys.stderr)
     print("\nTop institutions by GLOBAL retraction count (full RW csv, all subjects, unscored context):", file=sys.stderr)
     for row in top_global:
         print(f"  {row['count']:<5} {row['name']} ({row['country'] or '?'})", file=sys.stderr)
+    print("\nTop institutions by EXTERNAL retraction rate (OpenAlex works_count denominator, SCORED):", file=sys.stderr)
+    for row in top_external:
+        print(f"  {row['rate']:.3%}  n={row['n']}/{row['total']}  {row['name']} ({row['country'] or '?'})", file=sys.stderr)
 
 
 if __name__ == "__main__":

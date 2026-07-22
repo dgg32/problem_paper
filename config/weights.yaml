@@ -24,13 +24,12 @@ external_retracted_citation_flag_count: 2.0  # citing a retracted paper outside 
 journal_integrity_flag_count: 1.0         # publishing in a compromised/predatory-flagged journal
 ai_text_tell_flag_count: 2.0              # obvious AI-generated text
 p_value_hacking_flag_count: 0.5           # lowest weight -- noisy given small per-paper p-value samples
-pubmed_eoc_flag: 2.5                      # formal, dated, journal-issued Expression of Concern
+pubmed_eoc_flag: 10.0                     # formal, dated, journal-issued Expression of Concern (raised from 2.5, 2026-07-22, user request)
 pubmed_erratum_flag: 0.3                  # weak signal -- most errata are benign corrections
 ori_finding_flag: 4.0                     # federal ORI misconduct finding naming this exact DOI -- strongest fact-based signal
 
 # graph features (Neo4j)
 coauthor_other_misconduct: 1.5            # per probable-person co-author with a misconduct paper elsewhere
-institution_retr_rate: 1.5                # institution's retraction rate in [0,1]; max across a paper's INVOLVES institutions
 crossref_correction_flag_count: 0.3       # Crossref-deposited correction notices on this DOI; low weight, often benign
 
 # journal_retr_rate (graph-internal) REMOVED 2026-07-22: it and
@@ -42,79 +41,91 @@ crossref_correction_flag_count: 0.3       # Crossref-deposited correction notice
 # replacement. The property itself still exists as a Tier-B GDS input
 # feature (gds_node_classification.py) -- just no longer scored/shown here.
 
-# EXTERNAL rates (publisher_retraction_rate.py / country_retraction_rate.py /
-# journal_retraction_rate_external.py, added 2026-07-22): unlike
-# institution_retr_rate above (graph-internal, biased toward our own
-# retraction-seeded corpus), these use the FULL Retraction Watch csv as
-# numerator and Crossref/OpenAlex totals as an unbiased external denominator
-# -- real-world scale, so typical values are ~0.001-0.08, not 0.3-1.0 like
-# the graph-internal rates.
+# ENTITY-LEVEL RETRACTION RATES (institution_retraction_rate.py /
+# publisher_retraction_rate.py / country_retraction_rate.py /
+# journal_retraction_rate_external.py / author_retraction_rate_external.py):
+# institution_retr_rate is graph-internal (biased toward our own retraction-
+# seeded corpus, so typical values run 0.3-1.0); the other four use the FULL
+# Retraction Watch csv as numerator against a Crossref/OpenAlex/ORCID
+# external denominator -- real-world scale, typical values ~0.001-0.08 (or
+# up to ~0.4 for a repeat-offender author).
 #
-# RETUNING HISTORY, all 2026-07-22 (same day these were added):
-#   1. Original: 1.5/1.0/2.0, same per-tier precedent as the graph-internal
-#      rates, "small absolute contribution is fine, relative ordering is what
-#      matters" -- in practice too small to move rankings at all.
-#   2. Rescaled to publisher/journal x100, country x1000 -- promptly "too
-#      much weight": journal_retr_rate_external alone hit +52 for the top
-#      journal's ~26% rate, dwarfing every sensor-flag weight incl.
-#      ori_finding_flag's 4.0, and some papers reached the top of the
-#      ranking on venue alone.
-#   3. Walked back to x10/x10/x1000 (publisher 15, journal 20, country
-#      1000) -- fixed the dominance but now these signals "barely play a
-#      role" for the bulk of papers with a typical (non-outlier) rate.
-# ROOT CAUSE (fixed properly here, not by picking yet another weight): these
-# three rates are heavy-tailed -- most candidates ~0.01%-1%, a handful of
-# Hindawi-family journals 8%-26%. NO single linear weight can both
-# differentiate the typical range AND avoid letting the extreme tail
-# dominate -- turn it up enough to matter normally and the tail explodes;
-# turn it down to tame the tail and it goes invisible for everyone else.
-# There's also a conceptual reason a hard ceiling belongs here, not just a
-# numeric one: a venue's aggregate rate is evidence about the VENUE, not
-# about THIS paper -- same ecological-not-direct category as
+# WEIGHTING HISTORY, all 2026-07-22 (same day these were added):
+#   1. Original: plain linear weights (1.5/1.0/2.0-ish), "small absolute
+#      contribution is fine, relative ordering is what matters" -- too small
+#      to move rankings at all in practice.
+#   2. Rescaled x100/x1000 -- promptly "too much weight": one signal alone
+#      hit +52 for the top journal's ~26% rate, dwarfing every sensor-flag
+#      weight incl. ori_finding_flag's 4.0, some papers reaching #1 on venue
+#      alone.
+#   3. Walked back to smaller multipliers -- fixed the dominance but now
+#      these signals "barely play a role" for the bulk of typical-rate papers.
+#   4. Fixed properly: contribution = min(rate * weight, cap) -- a per-signal
+#      hard ceiling. Worked, but still had an arbitrary-feeling number
+#      (why 2.0? why 10.0?) disconnected from the actual data.
+#   5. REPLACED WITH MINMAX SCORING (this update): instead of a weight and a
+#      fixed cap, each signal is scaled against its own observed worst-in-
+#      corpus value -- see minmax_contribution()/compute_corpus_maxes() in
+#      tier_a_scoring.py. The single worst offender in a category (e.g. the
+#      author with the highest personal retraction rate found in this run)
+#      scores exactly the "_minmax_target" value below (20 by default);
+#      every other entity in that same category scores proportionally less
+#      (a rate half as bad scores half as much). institution_retr_rate is
+#      folded into this same mechanism too (previously a bare linear weight,
+#      uncapped) -- it's the same kind of entity-level rate, just measured
+#      against our own graph instead of an external denominator.
+# ROOT CAUSE this fixes (same as the capping episode): these rates are
+# heavy-tailed -- most candidates ~0.01%-1% (or 0.3-1.0 for
+# institution_retr_rate's graph-internal scale), a handful of entities far
+# higher. No single linear weight can differentiate the typical range AND
+# stop the extreme tail from dominating. Minmax sidesteps this by construction
+# -- the tail always maps to exactly the target, never higher, and everyone
+# else is honestly proportional to it. TRADEOFF worth knowing: minmax is MORE
+# sensitive to a single new extreme outlier than a fixed cap was, since that
+# outlier becomes the anchor for every other entity's score in its category,
+# not just its own -- checked live before shipping that all five current
+# maxima are backed by reasonably large samples (see tier_a_scoring.py's
+# module docstring for the exact numbers), not a fragile single-paper
+# artifact, but re-check this if a future run's max looks like it might be
+# based on a tiny/noisy sample.
+# There's also a conceptual reason these five are treated specially, separate
+# from the heavy-tail/numeric problem: an institution/publisher/country/
+# journal/author's aggregate rate is evidence about the ENTITY, not about
+# THIS paper -- same ecological-not-direct category as
 # coauthor_other_misconduct (plan.md §0: same person/place ≠ same
 # responsibility) -- so it must never be able to outrank direct per-paper
-# evidence (an ORI finding, this paper's own AI-text tells) on venue alone,
-# no matter how elevated the rate.
-# FIX: weight is set high enough to differentiate the normal range; a
-# separate _cap key ceilings the resulting contribution (see
-# capped_contribution() in tier_a_scoring.py -- contribution = min(rate *
-# weight, cap)). The raw rate is still shown in the evidence text; only the
-# SCORED contribution is capped. Current caps (2.0 for publisher/journal,
-# 1.5 for country) sit below ori_finding_flag/paperconan_confirmed's 4.0 and
-# pubmed_eoc_flag's 2.5, so even a maxed-out venue signal stays a real but
-# non-dominant nudge -- comparable to, never bigger than, the strongest
-# direct-evidence signals above.
-publisher_retr_rate: 100                  # publisher's real-world retraction rate; CAPPED, see publisher_retr_rate_cap
-publisher_retr_rate_cap: 2.0              # ceiling on publisher_retr_rate's contribution
-country_retr_rate: 1000                   # country's real-world retraction rate (smallest typical rate); CAPPED, see country_retr_rate_cap
-country_retr_rate_cap: 1.5                # ceiling on country_retr_rate's contribution
-journal_retr_rate_external: 100           # journal's real-world retraction rate; CAPPED, see journal_retr_rate_external_cap
-journal_retr_rate_external_cap: 2.0       # ceiling on journal_retr_rate_external's contribution
-
-# author_retr_rate_external (added 2026-07-22): a FIRST or LAST author's own
-# retraction RATE -- ORCID's claimed-works list as denominator, full
-# Retraction Watch csv matched by DOI (not name) as numerator, so it needs no
-# name-matching heuristics. Restricted to first/last position ("directly
-# responsible for the outcome", the user's framing) -- see
-# graph_processing/author_retraction_rate_external.py.
-# RETUNING HISTORY, all 2026-07-22 (same day):
-#   1. RATE * weight 1.0 (weight = ceiling at a theoretical 100% rate).
-#   2. User clarified they wanted COUNT * weight 1.0 instead ("Jingshan Shi
-#      has 4 retracted works... that should add 4 points") -- fixed a real
-#      undercounting problem (a 37.6%-rate/50-retraction author scored only
-#      +0.376 under (1)) but then let an extreme repeat offender (248
-#      retracted works) score +248 uncapped, alone dwarfing every other
-#      candidate's score (next tier ~15-20).
-#   3. Capped the count at 10 -- fixed the dominance, but a raw "10
-#      retracted works" ceiling reads oddly next to every other weight here.
-#   4. Settled: back to RATE, but * 100 and capped at 10 -- same
-#      weight/cap shape as publisher_retr_rate/journal_retr_rate_external,
-#      so this signal now reads on the same scale as its siblings. The raw
-#      retracted-works count is still shown in the evidence text for context.
-author_retr_rate_external: 100.0
-author_retr_rate_external_cap: 10.0
+# evidence (an ORI finding, this paper's own AI-text tells) on entity
+# association alone. The raw rate is still shown in the evidence text; only
+# the SCORED contribution is minmax-scaled. Targets LOWERED to 10 (from an
+# initial 20) 2026-07-22, same day, user request -- the original 20 was well
+# above every direct-evidence signal in the system, in tension with the
+# "should never outrank direct per-paper evidence" principle above; 10 is
+# still above ori_finding_flag/paperconan_confirmed's 4.0 (the single
+# worst-in-corpus offender in any of these 5 categories can still outscore an
+# ORI finding alone), but ties pubmed_eoc_flag's new 10.0 (also raised the
+# same day) rather than dwarfing it outright. Lower further if even this is
+# too high relative to direct-evidence signals.
+institution_retr_rate_minmax_target: 10.0
+publisher_retr_rate_minmax_target: 10.0
+# country_retr_rate LOWERED to 2.5 (from 10.0) 2026-07-22, same day, user
+# request: country is by far the coarsest of these 5 categories, so its
+# worst-in-corpus value (Saudi Arabia, 0.33% national rate) is shared by ~60+
+# candidate papers, all getting the FULL target regardless of their own
+# evidence -- unlike institution/publisher/journal/author, where the max is
+# typically held by only 1-4 papers. Checked: this isn't a small-sample
+# artifact (SA's rate rests on 2,418 RW records / 734k OpenAlex works, CN's on
+# 37,620 / 16.7M -- both large, low-variance estimates; Bayesian shrinkage
+# toward the global mean was tried and does NOT change the ranking unless the
+# prior is implausibly strong, since neither country's rate is actually
+# noisy). The real issue is structural, not statistical: minmax's winner-
+# take-all scaling combined with country's coarse granularity. Lowering the
+# target (rather than shrinking the rate) directly caps how much a single
+# ecological, paper-non-specific bucket can contribute.
+country_retr_rate_minmax_target: 2.5
+journal_retr_rate_external_minmax_target: 10.0
+author_retr_rate_external_minmax_target: 10.0
 
 # paperconan (filesystem-derived, see load_paperconan_runs() in tier_a_scoring.py)
 # Only these two ADJUDICATED verdicts are scored -- never raw high/medium/low counts.
-paperconan_needs_human: 2.0               # opened, quantified anomaly that survived adjudication (~ pubmed_eoc)
+paperconan_needs_human: 2.0               # opened, quantified anomaly that survived adjudication
 paperconan_confirmed: 4.0                 # confirmed by adjudication (tied with ori_finding_flag)

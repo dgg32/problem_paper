@@ -17,11 +17,16 @@ and expands every contributing signal into named, sourced evidence:
     a paper retracted for a misconduct-signal reason," not "formally
     adjudicated." Keep that distinction in any human-facing copy.
   - institution_retr_rate: the (worst) involved institution's measured
-    retraction rate in this graph -- see institution_retraction_rate.py.
-  - publisher_retr_rate / country_retr_rate / journal_retr_rate_external:
-    EXTERNAL real-world retraction rates (full Retraction Watch csv over a
-    Crossref/OpenAlex total-works denominator, NOT scoped to our own graph)
-    -- see publisher_retraction_rate.py / country_retraction_rate.py /
+    retraction rate in this graph -- unscored context only (2026-07-22:
+    replaced in scoring by institution_retr_rate_external below, since this
+    graph-internal rate runs inflated, e.g. 85-96% for the top institutions,
+    "correct but too high to be intuitive" per user feedback -- same story as
+    the old graph-internal journal_retr_rate). See institution_retraction_rate.py.
+  - institution_retr_rate_external / publisher_retr_rate / country_retr_rate /
+    journal_retr_rate_external: EXTERNAL real-world retraction rates (full
+    Retraction Watch csv over a Crossref/OpenAlex/ROR total-works denominator,
+    NOT scoped to our own graph) -- see institution_retraction_rate.py /
+    publisher_retraction_rate.py / country_retraction_rate.py /
     journal_retraction_rate_external.py.
   - author_retr_rate_external: a FIRST or LAST author's OWN retraction RATE
     (see tier_a_scoring.py's WEIGHTS comment for the full 2026-07-22 retuning
@@ -58,7 +63,7 @@ from neo4j import GraphDatabase
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "graph_processing"))
 from normalize_authors import resolve_connection  # noqa: E402
-from tier_a_scoring import WEIGHTS, capped_contribution  # noqa: E402 -- single source of truth, see BUG.md #7
+from tier_a_scoring import WEIGHTS, minmax_contribution, compute_corpus_maxes, get_corpus_max  # noqa: E402 -- single source of truth, see BUG.md #7
 
 # Must match gds_node_classification.py's MISCONDUCT_REASONS (broad,
 # "misconduct-signal" set) -- NOT AuthorInstance.on_misconduct_paper's
@@ -91,6 +96,10 @@ RETURN p.doi AS doi,
        coalesce(p.institution_retr_rate, 0.0) AS institution_retr_rate,
        p.institution_retr_rate_name AS institution_retr_rate_name,
        p.institution_retr_rate_n AS institution_retr_rate_n,
+       coalesce(p.institution_retr_rate_external, 0.0) AS institution_retr_rate_external,
+       p.institution_retr_rate_external_name AS institution_retr_rate_external_name,
+       p.institution_retr_rate_external_n AS institution_retr_rate_external_n,
+       p.institution_retr_rate_external_total AS institution_retr_rate_external_total,
        p.institution_global_retraction_count AS institution_global_retraction_count,
        p.institution_global_retraction_count_name AS institution_global_retraction_count_name,
        coalesce(p.journal_hijack_flag, false) AS journal_hijack_flag,
@@ -148,11 +157,11 @@ def calculate_score(row: dict) -> float:
         row["journal_count"] * WEIGHTS["journal_integrity_flag_count"] +
         row["ai_count"] * WEIGHTS["ai_text_tell_flag_count"] +
         row["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"] +
-        row["institution_retr_rate"] * WEIGHTS["institution_retr_rate"] +
-        capped_contribution("publisher_retr_rate", row["publisher_retr_rate"]) +
-        capped_contribution("country_retr_rate", row["country_retr_rate"]) +
-        capped_contribution("journal_retr_rate_external", row["journal_retr_rate_external"]) +
-        capped_contribution("author_retr_rate_external", row["author_retr_rate_external"]) +
+        minmax_contribution("institution_retr_rate_external", row["institution_retr_rate_external"]) +
+        minmax_contribution("publisher_retr_rate", row["publisher_retr_rate"]) +
+        minmax_contribution("country_retr_rate", row["country_retr_rate"]) +
+        minmax_contribution("journal_retr_rate_external", row["journal_retr_rate_external"]) +
+        minmax_contribution("author_retr_rate_external", row["author_retr_rate_external"]) +
         row["correction_count"] * WEIGHTS["crossref_correction_flag_count"]
     )
 
@@ -169,6 +178,7 @@ def main() -> None:
     with driver.session(database=conn["database"]) as s:
         rows = [dict(r) for r in s.run(QUERY)]
 
+        compute_corpus_maxes(rows)
         scored = [(calculate_score(r), r) for r in rows]
         scored.sort(key=lambda t: t[0], reverse=True)
         top_rows = scored[:args.top]
@@ -287,11 +297,27 @@ def main() -> None:
             if row["institution_retr_rate"] > 0:
                 flags_summary.append({
                     "type": "institution_retr_rate",
+                    "scored": False,
                     "value": round(row["institution_retr_rate"], 3),
-                    "weight": WEIGHTS["institution_retr_rate"],
-                    "contribution": round(row["institution_retr_rate"] * WEIGHTS["institution_retr_rate"], 2),
                     "note": (f"{row['institution_retr_rate_name']} has a {row['institution_retr_rate']:.1%} "
-                             f"retraction rate in this graph (n={row['institution_retr_rate_n']} papers)."),
+                             f"retraction rate in this graph (n={row['institution_retr_rate_n']} papers). "
+                             "Context only, never scored (2026-07-22): this graph-internal rate runs inflated "
+                             "-- institution_retr_rate_external below is the real, scored replacement."),
+                })
+
+            if row["institution_retr_rate_external"] > 0:
+                corpus_max = get_corpus_max("institution_retr_rate_external")
+                flags_summary.append({
+                    "type": "institution_retr_rate_external",
+                    "value": round(row["institution_retr_rate_external"], 5),
+                    "corpus_max": round(corpus_max, 5),
+                    "target_max_score": WEIGHTS["institution_retr_rate_minmax_target"],
+                    "contribution": round(minmax_contribution("institution_retr_rate_external", row["institution_retr_rate_external"]), 2),
+                    "note": (f"{row['institution_retr_rate_external_name']} has an external (Retraction Watch / "
+                             f"OpenAlex via ROR) retraction rate of {row['institution_retr_rate_external']:.3%} "
+                             f"(n={row['institution_retr_rate_external_n']}/{row['institution_retr_rate_external_total']}) "
+                             "-- NOT scoped to our own graph. Minmax-scaled against the worst institution in this "
+                             f"corpus ({corpus_max:.3%}), which scores {WEIGHTS['institution_retr_rate_minmax_target']}."),
                 })
 
             if row["institution_global_retraction_count"]:
@@ -343,72 +369,67 @@ def main() -> None:
                 })
 
             if row["publisher_retr_rate"] > 0:
-                contrib = capped_contribution("publisher_retr_rate", row["publisher_retr_rate"])
-                capped = contrib < row["publisher_retr_rate"] * WEIGHTS["publisher_retr_rate"]
+                corpus_max = get_corpus_max("publisher_retr_rate")
                 flags_summary.append({
                     "type": "publisher_retr_rate",
                     "value": round(row["publisher_retr_rate"], 5),
-                    "weight": WEIGHTS["publisher_retr_rate"],
-                    "contribution": round(contrib, 4),
-                    "capped": capped,
+                    "corpus_max": round(corpus_max, 5),
+                    "target_max_score": WEIGHTS["publisher_retr_rate_minmax_target"],
+                    "contribution": round(minmax_contribution("publisher_retr_rate", row["publisher_retr_rate"]), 4),
                     "note": (f"{row['publisher_retr_rate_name']} has an external (Retraction Watch / Crossref) "
                              f"retraction rate of {row['publisher_retr_rate']:.3%} "
-                             f"(n={row['publisher_retr_rate_n']} RW-recorded retractions) -- NOT scoped to our own graph."
-                             + (f" Contribution capped at {WEIGHTS['publisher_retr_rate_cap']} (see plan.md 2026-07-22 "
-                                "caps update) so a single infamous publisher can't outrank direct per-paper evidence."
-                                if capped else "")),
+                             f"(n={row['publisher_retr_rate_n']} RW-recorded retractions) -- NOT scoped to our own graph. "
+                             f"Minmax-scaled against the worst publisher in this corpus ({corpus_max:.3%}), which "
+                             f"scores {WEIGHTS['publisher_retr_rate_minmax_target']}."),
                 })
 
             if row["country_retr_rate"] > 0:
-                contrib = capped_contribution("country_retr_rate", row["country_retr_rate"])
-                capped = contrib < row["country_retr_rate"] * WEIGHTS["country_retr_rate"]
+                corpus_max = get_corpus_max("country_retr_rate")
                 flags_summary.append({
                     "type": "country_retr_rate",
                     "value": round(row["country_retr_rate"], 5),
-                    "weight": WEIGHTS["country_retr_rate"],
-                    "contribution": round(contrib, 4),
-                    "capped": capped,
+                    "corpus_max": round(corpus_max, 5),
+                    "target_max_score": WEIGHTS["country_retr_rate_minmax_target"],
+                    "contribution": round(minmax_contribution("country_retr_rate", row["country_retr_rate"]), 4),
                     "note": (f"{row['country_retr_rate_name']} has an external (Retraction Watch / OpenAlex) "
                              f"retraction rate of {row['country_retr_rate']:.3%} "
-                             f"(n={row['country_retr_rate_n']} RW-recorded retractions) -- NOT scoped to our own graph."
-                             + (f" Contribution capped at {WEIGHTS['country_retr_rate_cap']}." if capped else "")),
+                             f"(n={row['country_retr_rate_n']} RW-recorded retractions) -- NOT scoped to our own graph. "
+                             f"Minmax-scaled against the worst country in this corpus ({corpus_max:.3%}), which "
+                             f"scores {WEIGHTS['country_retr_rate_minmax_target']}."),
                 })
 
             if row["journal_retr_rate_external"] > 0:
-                contrib = capped_contribution("journal_retr_rate_external", row["journal_retr_rate_external"])
-                capped = contrib < row["journal_retr_rate_external"] * WEIGHTS["journal_retr_rate_external"]
+                corpus_max = get_corpus_max("journal_retr_rate_external")
                 flags_summary.append({
                     "type": "journal_retr_rate_external",
                     "value": round(row["journal_retr_rate_external"], 5),
-                    "weight": WEIGHTS["journal_retr_rate_external"],
-                    "contribution": round(contrib, 4),
-                    "capped": capped,
+                    "corpus_max": round(corpus_max, 5),
+                    "target_max_score": WEIGHTS["journal_retr_rate_external_minmax_target"],
+                    "contribution": round(minmax_contribution("journal_retr_rate_external", row["journal_retr_rate_external"]), 4),
                     "note": (f"{row['journal']} has an external (Retraction Watch / Crossref Journals API) "
                              f"retraction rate of {row['journal_retr_rate_external']:.3%} "
-                             f"(n={row['journal_retr_rate_external_n']} RW-recorded retractions) -- NOT scoped to our own graph."
-                             + (f" Contribution capped at {WEIGHTS['journal_retr_rate_external_cap']}." if capped else "")),
+                             f"(n={row['journal_retr_rate_external_n']} RW-recorded retractions) -- NOT scoped to our own graph. "
+                             f"Minmax-scaled against the worst journal in this corpus ({corpus_max:.3%}), which "
+                             f"scores {WEIGHTS['journal_retr_rate_external_minmax_target']}."),
                 })
 
             if row["author_retr_rate_external_n"] > 0:
-                contrib = capped_contribution("author_retr_rate_external", row["author_retr_rate_external"])
-                capped = contrib < row["author_retr_rate_external"] * WEIGHTS["author_retr_rate_external"]
+                corpus_max = get_corpus_max("author_retr_rate_external")
                 flags_summary.append({
                     "type": "author_retr_rate_external",
                     "count": row["author_retr_rate_external_n"],
                     "value": round(row["author_retr_rate_external"], 5),
-                    "weight": WEIGHTS["author_retr_rate_external"],
-                    "contribution": round(contrib, 2),
-                    "capped": capped,
+                    "corpus_max": round(corpus_max, 5),
+                    "target_max_score": WEIGHTS["author_retr_rate_external_minmax_target"],
+                    "contribution": round(minmax_contribution("author_retr_rate_external", row["author_retr_rate_external"]), 2),
                     "note": (f"{row['author_retr_rate_external_n']} out of {row['author_retr_rate_external_name']}'s "
                              f"({row['author_retr_rate_external_position']} author) "
                              f"{row['author_retr_rate_external_total']} ORCID-claimed works were retracted "
                              f"({row['author_retr_rate_external']:.1%}), per Retraction Watch -- matched by DOI "
                              "against their own ORCID record, not by name. Same person ≠ same responsibility (§0): "
                              "this is the author's track record across ALL their claimed work, not a finding about "
-                             "this paper."
-                             + (f" Contribution capped at {WEIGHTS['author_retr_rate_external_cap']} so one "
-                                "prolific repeat-offender author can't dwarf every other candidate's entire score."
-                                if capped else "")),
+                             "this paper. Minmax-scaled against the worst first/last author in this corpus "
+                             f"({corpus_max:.1%}), who scores {WEIGHTS['author_retr_rate_external_minmax_target']}."),
                 })
 
             if row["correction_count"] > 0:
