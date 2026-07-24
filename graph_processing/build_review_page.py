@@ -54,13 +54,15 @@ RUNS_DIR = REPO_ROOT / "runs"
 TAG_LABELS = [
     ("eoc", "Expression of Concern"),
     ("ori", "ORI Finding"),
-    ("coauthor", "Co-author of misconduct"),
+    ("fl-misconduct", "1st/last author: misconduct retraction"),
+    ("fl-any-retr", "1st/last author: other retraction"),
+    ("mid-misconduct", "Co-author: misconduct retraction"),
+    ("mid-any-retr", "Co-author: other retraction"),
     ("cites-retracted", "Cites retracted"),
     ("cites-retracted-ext", "Cites retracted (ext.)"),
     ("self-cite", "Cites own retracted"),
     ("correction", "Crossref correction"),
     ("journal", "Journal integrity"),
-    ("author-retr", "Main authors of retracted works"),
     ("journal-high-retr", "High retract rate journal"),
     ("publisher-high-retr", "High retract rate publisher"),
     ("institution-high-retr", "High retract rate institution"),
@@ -148,7 +150,10 @@ RETURN p.doi AS doi, p.title AS title, j.name AS journal,
        CASE WHEN p.ori_finding_doc_url IS NOT NULL THEN 1 ELSE 0 END AS ori_flag,
        p.ori_finding_doc_url AS ori_doc_url, p.ori_respondent_name AS ori_respondent,
        p.ori_finding_date AS ori_date,
-       coalesce(p.coauthor_other_misconduct, 0) AS coauthor_misconduct,
+       coalesce(p.mid_any_count, 0) AS mid_any_count,
+       coalesce(p.mid_misconduct_count, 0) AS mid_misconduct_count,
+       coalesce(p.fl_any_count, 0) AS fl_any_count,
+       coalesce(p.fl_misconduct_count, 0) AS fl_misconduct_count,
        coalesce(p.institution_retr_rate, 0.0) AS institution_retr_rate,
        p.institution_retr_rate_name AS institution_retr_rate_name,
        p.institution_retr_rate_n AS institution_retr_rate_n,
@@ -175,11 +180,16 @@ RETURN p.doi AS doi, p.title AS title, j.name AS journal,
        p.country_retr_rate_n AS country_retr_rate_n,
        coalesce(p.journal_retr_rate_external, 0.0) AS journal_retr_rate_external,
        p.journal_retr_rate_external_n AS journal_retr_rate_external_n,
-       coalesce(p.author_retr_rate_external, 0.0) AS author_retr_rate_external,
-       p.author_retr_rate_external_name AS author_retr_rate_external_name,
-       p.author_retr_rate_external_position AS author_retr_rate_external_position,
-       coalesce(p.author_retr_rate_external_n, 0) AS author_retr_rate_external_n,
-       p.author_retr_rate_external_total AS author_retr_rate_external_total,
+       p.first_author_name AS first_author_name,
+       coalesce(p.first_author_retr_n, 0) AS first_author_retr_n,
+       coalesce(p.first_author_retr_misconduct_n, 0) AS first_author_retr_misconduct_n,
+       p.first_author_retr_rate AS first_author_retr_rate,
+       p.first_author_retr_total AS first_author_retr_total,
+       p.last_author_name AS last_author_name,
+       coalesce(p.last_author_retr_n, 0) AS last_author_retr_n,
+       coalesce(p.last_author_retr_misconduct_n, 0) AS last_author_retr_misconduct_n,
+       p.last_author_retr_rate AS last_author_retr_rate,
+       p.last_author_retr_total AS last_author_retr_total,
        coalesce(p.crossref_correction_count, 0) AS correction_count,
        p.crossref_correction_dois AS correction_dois,
        p.gds_misconduct_prob AS gds_prob,
@@ -197,33 +207,51 @@ RETURN p.doi AS doi, p.title AS title, j.name AS journal,
        p.p_value_hacking_flags AS pval_flags
 """
 
+# Restricted to MIDDLE position (2026-07-22) -- first/last co-authors moved
+# to the ORCID-strict author_retraction_rate_external.py path (see the
+# fl-misconduct/fl-any-retr rows in render_evidence()). A cluster with BOTH
+# a misconduct-reason and a non-misconduct-reason retracted paper elsewhere
+# counts ONLY as misconduct (mirrors coauthor_retraction_severity.py's
+# mutually-exclusive mid_any_count/mid_misconduct_count split) --
+# $misconduct=true returns clusters with >=1 misconduct-reason paper;
+# $misconduct=false returns clusters with ZERO misconduct-reason papers.
 COAUTHOR_QUERY = """
-MATCH (p:Paper {doi: $doi})<-[:WROTE]-(a:AuthorInstance)
+MATCH (p:Paper {doi: $doi})<-[:WROTE {author_position: 'middle'}]-(a:AuthorInstance)
 WITH p, collect(DISTINCT a.cluster_id) AS clusters
 UNWIND clusters AS cid
 MATCH (mate:AuthorInstance {cluster_id: cid})-[:WROTE]->(mp:Paper)-[:RETRACTED_FOR]->(r:Reason)
-WHERE mp <> p AND r.code IN $reasons
-WITH mate.name AS coauthor_name, collect(DISTINCT mp.doi)[0..2] AS example_dois,
-     collect(DISTINCT r.code) AS reasons
-RETURN coauthor_name, example_dois, reasons ORDER BY coauthor_name LIMIT 6
+WHERE mp <> p
+WITH mate.name AS coauthor_name, cid AS cluster_id, mp, collect(DISTINCT r.code) AS codes
+WITH coauthor_name, cluster_id, mp, any(c IN codes WHERE c IN $reasons) AS mp_is_misconduct
+WITH coauthor_name, cluster_id,
+     collect(DISTINCT mp.doi) AS example_dois,
+     any(f IN collect(mp_is_misconduct) WHERE f) AS has_misconduct
+WHERE has_misconduct = $misconduct
+RETURN coauthor_name, example_dois[0..2] AS example_dois
+ORDER BY coauthor_name
+LIMIT 6
 """
 
 
-# The five entity-level (ecological, not direct-evidence) minmax signals --
-# broken out as their own function so build_review_page.py can offer an
-# "exclude these from score" toggle (2026-07-22, user request, prompted by
-# the same session's minmax-target discussion: the worst-in-corpus offender
-# in any of these 5 can still outscore a single direct-evidence signal like
-# an ORI finding, so a reviewer may want to see the ranking with vs. without
-# them to judge how much of a paper's score rests on entity association
-# rather than its own conduct).
+# All minmax-scored signals summed in one place -- broken out as its own
+# function so each individual scoring chip's live re-rank (toggleScoreChip())
+# can subtract just its own term via chip_contributions() below, while
+# score() still adds up to the same total. The four entity-rate signals
+# (institution/publisher/country/journal) and the four co-author-severity
+# buckets (mid_any/mid_misconduct/fl_any/fl_misconduct, merged 2026-07-22
+# from coauthor_other_misconduct + author_retr_rate_external -- user request)
+# are all MINMAX-SCALED against their own worst-in-corpus value; see
+# MINMAX_KEYS in tier_a_scoring.py.
 def minmax_total(r: dict) -> float:
     return (
         minmax_contribution("institution_retr_rate_external", r["institution_retr_rate_external"])
         + minmax_contribution("publisher_retr_rate", r["publisher_retr_rate"])
         + minmax_contribution("country_retr_rate", r["country_retr_rate"])
         + minmax_contribution("journal_retr_rate_external", r["journal_retr_rate_external"])
-        + minmax_contribution("author_retr_rate_external", r["author_retr_rate_external"])
+        + minmax_contribution("mid_any_count", r["mid_any_count"])
+        + minmax_contribution("mid_misconduct_count", r["mid_misconduct_count"])
+        + minmax_contribution("fl_any_count", r["fl_any_count"])
+        + minmax_contribution("fl_misconduct_count", r["fl_misconduct_count"])
     )
 
 
@@ -239,7 +267,6 @@ def score(r: dict) -> float:
         + r["eoc_flag"] * WEIGHTS["pubmed_eoc_flag"]
         + r["erratum_flag"] * WEIGHTS["pubmed_erratum_flag"]
         + r["ori_flag"] * WEIGHTS["ori_finding_flag"]
-        + r["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"]
         + minmax_total(r)
         + r["correction_count"] * WEIGHTS["crossref_correction_flag_count"]
         + (WEIGHTS["paperconan_needs_human"] if adj == "needs_human" else 0.0)
@@ -255,8 +282,9 @@ def score(r: dict) -> float:
 # other TAG_LABELS entry keeps the old filter behaviour unchanged, since
 # there's nothing for them to zero out.
 SCORED_TAGS = {
-    "eoc", "ori", "coauthor", "cites-retracted", "cites-retracted-ext",
-    "correction", "journal", "author-retr", "journal-high-retr", "publisher-high-retr",
+    "eoc", "ori", "fl-misconduct", "fl-any-retr", "mid-misconduct", "mid-any-retr",
+    "cites-retracted", "cites-retracted-ext",
+    "correction", "journal", "journal-high-retr", "publisher-high-retr",
     "institution-high-retr", "country-high-retr",
     "ai", "pval", "erratum", "paperconan",
 }
@@ -264,23 +292,30 @@ SCORED_TAGS = {
 
 def chip_contributions(r: dict) -> dict[str, float]:
     """Per-signal score contribution for each SCORED_TAGS chip -- all 5
-    entity-rate minmax signals now have their own chip (institution-high-retr
-    and country-high-retr added 2026-07-22, retiring the old bundled 5-signal
-    switch entirely; see HIGH_COUNTRY_RATE_THRESHOLD's comment for why
-    institution uses presence-only (>0) while country needed its own
-    calibrated cutoff). Embedded as JSON on each card (data-contribs) so the
-    browser can subtract any subset live without a page reload -- mirrors
-    minmax_total()'s terms exactly, just broken out signal-by-signal."""
+    entity-rate minmax signals plus the 4 co-author-severity buckets
+    (fl-misconduct/fl-any-retr/mid-misconduct/mid-any-retr, merged
+    2026-07-22 from coauthor_other_misconduct + author_retr_rate_external --
+    user request) have their own chip. Embedded as JSON on each card
+    (data-contribs) so the browser can subtract any subset live without a
+    page reload -- mirrors minmax_total()'s terms exactly, just broken out
+    signal-by-signal. Each value here is the PAPER-LEVEL total for that tag
+    (matching minmax_total()'s terms exactly, so the chip toggle zeroes the
+    right amount); render_evidence()'s individual first/last-author rows
+    show a smaller PER-POSITION share of this same total (see its own note)
+    so two qualifying positions on one paper don't each claim the whole
+    paper-level contribution."""
     adj = r.get("paperconan_adjudication")
     return {
         "eoc": r["eoc_flag"] * WEIGHTS["pubmed_eoc_flag"],
         "ori": r["ori_flag"] * WEIGHTS["ori_finding_flag"],
-        "coauthor": r["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"],
+        "mid-misconduct": minmax_contribution("mid_misconduct_count", r["mid_misconduct_count"]),
+        "mid-any-retr": minmax_contribution("mid_any_count", r["mid_any_count"]),
+        "fl-misconduct": minmax_contribution("fl_misconduct_count", r["fl_misconduct_count"]),
+        "fl-any-retr": minmax_contribution("fl_any_count", r["fl_any_count"]),
         "cites-retracted": r["ret_count"] * WEIGHTS["retracted_citation_flag_count"],
         "cites-retracted-ext": r["ext_ret_count"] * WEIGHTS["external_retracted_citation_flag_count"],
         "correction": r["correction_count"] * WEIGHTS["crossref_correction_flag_count"],
         "journal": r["journal_count"] * WEIGHTS["journal_integrity_flag_count"],
-        "author-retr": minmax_contribution("author_retr_rate_external", r["author_retr_rate_external"]),
         "journal-high-retr": minmax_contribution("journal_retr_rate_external", r["journal_retr_rate_external"]),
         "publisher-high-retr": minmax_contribution("publisher_retr_rate", r["publisher_retr_rate"]),
         "ai": r["ai_count"] * WEIGHTS["ai_text_tell_flag_count"],
@@ -394,7 +429,8 @@ def image_badge(img: dict) -> str:
     return '<span class="badge badge-pc-ok">🖼 images: no reuse</span>'
 
 
-def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict) -> str:
+def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors_any: list[dict],
+                     pp_cats: dict, pc_runs: dict) -> str:
     """Build the expandable per-paper evidence HTML."""
     parts: list[str] = []
 
@@ -455,26 +491,13 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             tag="eoc",
         ))
 
-    if r["coauthor_misconduct"] > 0:
-        names = "".join(
+    def _coauthor_names(clist: list[dict]) -> str:
+        return "".join(
             f'<li>👤 <strong>{esc(c["coauthor_name"])}</strong> — '
             + ", ".join(f'<a href="https://doi.org/{esc(d)}" target="_blank" rel="noopener">{esc(d)}</a>' for d in c["example_dois"])
-            + f' <span class="muted">({esc(", ".join(c["reasons"]))})</span></li>'
-            for c in coauthors
+            + '</li>'
+            for c in clist
         )
-        parts.append(row(
-            f'Co-author of misconduct work ({r["coauthor_misconduct"]} co-author(s))',
-            r["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"],
-            f'<ul>{names}</ul>',
-            help='Same person ≠ same responsibility. This means a co-author shares a cluster with '
-                 'someone who wrote a paper retracted for a misconduct-signal reason — not a formal finding about '
-                 'this paper or this person. Author role varies paper to paper. '
-                 'Different from "Author retraction rate" below: this counts ANY co-author (not just first/last), '
-                 'matched via a fuzzier probable-person cluster (not strict ORCID), and only counts '
-                 'misconduct-REASON retractions found elsewhere IN THIS GRAPH — not an external, all-cause, '
-                 'ORCID-verified rate.',
-            tag="coauthor",
-        ))
 
     if r["ret_count"] > 0:
         flags = json.loads(r["ret_flags"] or "[]")
@@ -555,14 +578,19 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
         ))
 
     def minmax_note(key: str) -> str:
-        """Help-popover text explaining the minmax scaling for one of the five
-        entity-level retraction-rate rows -- see plan.md's 2026-07-22 minmax-
-        scoring update (minmax_contribution() in tier_a_scoring.py): the worst
-        offender in this category anchors the top of the scale (its target
-        score), everyone else scores proportionally less."""
+        """Help-popover text explaining the minmax scaling for one of the
+        entity-level retraction-RATE rows or co-author-severity COUNT rows --
+        see plan.md's 2026-07-22 minmax-scoring update (minmax_contribution()
+        in tier_a_scoring.py): the worst offender in this category anchors
+        the top of the scale (its target score), everyone else scores
+        proportionally less. Count-based keys (fl_*/mid_* co-author buckets,
+        added 2026-07-22) show the worst-in-corpus value as a plain integer;
+        rate-based keys (institution/publisher/country/journal) show it as
+        a percentage -- a bare "2" would be misleading formatted as "200%"."""
         target = WEIGHTS[MINMAX_KEYS[key]]
         corpus_max = get_corpus_max(key)
-        return (f'Minmax-scaled: the worst-in-corpus value for this signal ({corpus_max:.3%}) scores '
+        corpus_max_str = f'{corpus_max:g}' if key.endswith("_count") else f'{corpus_max:.3%}'
+        return (f'Minmax-scaled: the worst-in-corpus value for this signal ({corpus_max_str}) scores '
                 f'{target:g}; this row scores proportionally less.')
 
     if r["journal_retr_rate_external"] > 0:
@@ -607,28 +635,6 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             tag="country-high-retr",
         ))
 
-    if r["author_retr_rate_external_n"] > 0:
-        author_help = (
-            'Retracted per Retraction Watch, matched by DOI against this specific person\'s own ORCID '
-            'record -- no name-matching involved. Restricted to first/last authors only (the ones '
-            'conventionally responsible for the work). This is their track record across ALL their claimed '
-            'work, not a finding about this paper specifically. '
-            'Different from "Co-author of misconduct work" above: this is restricted to the first/last '
-            'author specifically, matched by strict ORCID (not a fuzzy cluster), and counts ANY retraction '
-            'reason in the full external Retraction Watch database -- not just misconduct-specific reasons '
-            'found in this graph. '
-            + minmax_note("author_retr_rate_external")
-        )
-        parts.append(row(
-            f'👤 Author retraction rate — {esc(r["author_retr_rate_external_position"])} author (external)',
-            minmax_contribution("author_retr_rate_external", r["author_retr_rate_external"]),
-            f'{r["author_retr_rate_external_n"]} out of {esc(r["author_retr_rate_external_name"])}\'s '
-            f'{r["author_retr_rate_external_total"]} ORCID-claimed works were retracted '
-            f'({r["author_retr_rate_external"]:.1%}).',
-            help=author_help,
-            tag="author-retr",
-        ))
-
     if r["correction_count"] > 0:
         correction_dois = json.loads(r["correction_dois"] or "[]")
         items = "".join(
@@ -668,6 +674,75 @@ def render_evidence(r: dict, coauthors: list[dict], pp_cats: dict, pc_runs: dict
             f'{esc(pc.get("top_finding") or "")}. {esc(pc.get("conclusion") or "")} '
             f'<span class="muted">Full run: <code>runs/{esc(pc.get("_dir") or "")}/</code></span>',
             tag="paperconan",
+        ))
+
+    # --- author history block, grouped together at the bottom of the scored
+    # rows (2026-07-24, user request: "look at one block and know about the
+    # author history" -- these 4 rows used to be split apart, mid_misconduct/
+    # mid_any near the top and first/last further down). Order: first author,
+    # last author, THEN both co-author rows together (misconduct, then
+    # non-misconduct last) -- 2026-07-24 fix: mid_misconduct used to sit
+    # BEFORE first/last while mid_any sat AFTER, so the two co-author rows
+    # never appeared next to each other and the block looked inconsistently
+    # ordered card to card depending on which rows were present. Now both
+    # co-author rows are adjacent, always after first/last.
+    for position, name_key, n_key, mc_key, rate_key, total_key in (
+        ("first", "first_author_name", "first_author_retr_n", "first_author_retr_misconduct_n",
+         "first_author_retr_rate", "first_author_retr_total"),
+        ("last", "last_author_name", "last_author_retr_n", "last_author_retr_misconduct_n",
+         "last_author_retr_rate", "last_author_retr_total"),
+    ):
+        if r[n_key] == 0:
+            continue
+        is_misconduct = r[mc_key] > 0
+        key = "fl_misconduct_count" if is_misconduct else "fl_any_count"
+        tag = "fl-misconduct" if is_misconduct else "fl-any-retr"
+        author_help = (
+            'Retracted per Retraction Watch, matched by DOI against this specific person\'s own ORCID '
+            'record -- no name-matching involved. Restricted to first/last authors only (the ones '
+            'conventionally responsible for the work). This is their track record across ALL their claimed '
+            'work, not a finding about this paper specifically. '
+            'Different from the co-author row(s) below: this is restricted to the first/last '
+            'author specifically, matched by strict ORCID (not a fuzzy cluster), and counts against the '
+            'full external Retraction Watch database'
+            + (', a MISCONDUCT-coded reason among them' if is_misconduct else
+               ' (none of this person\'s retractions are misconduct-coded -- half the weight of a misconduct one)')
+            + '. '
+            + minmax_note(key)
+        )
+        parts.append(row(
+            f'👤 {position.capitalize()} author retraction rate (external)'
+            + (' — misconduct-coded' if is_misconduct else ' — non-misconduct'),
+            minmax_contribution(key, 1),
+            f'{r[n_key]} out of {esc(r[name_key])}\'s {r[total_key]} ORCID-claimed works were retracted '
+            f'({r[rate_key]:.1%}), {r[mc_key]} of them misconduct-coded.',
+            help=author_help,
+            tag=tag,
+        ))
+
+    if r["mid_misconduct_count"] > 0:
+        parts.append(row(
+            f'Co-authors in misconduct work ({r["mid_misconduct_count"]} co-author(s))',
+            minmax_contribution("mid_misconduct_count", r["mid_misconduct_count"]),
+            f'<ul>{_coauthor_names(mid_coauthors_misconduct)}</ul>',
+            help='Same person ≠ same responsibility. This means a MIDDLE co-author shares a cluster with '
+                 'someone who wrote a paper retracted for a misconduct-signal reason — not a formal finding about '
+                 'this paper or this person. Matched via a fuzzier probable-person cluster (not strict ORCID), '
+                 'and only counts misconduct-REASON retractions found elsewhere IN THIS GRAPH — not an external, '
+                 'all-cause, ORCID-verified rate. Different from the 1st/last author rows above: those use '
+                 'strict ORCID matching against the full external Retraction Watch database.',
+            tag="mid-misconduct",
+        ))
+
+    if r["mid_any_count"] > 0:
+        parts.append(row(
+            f'Co-authors in other retracted work, non-misconduct ({r["mid_any_count"]} co-author(s))',
+            minmax_contribution("mid_any_count", r["mid_any_count"]),
+            f'<ul>{_coauthor_names(mid_coauthors_any)}</ul>',
+            help='Same as the misconduct row above, but for a MIDDLE co-author whose other retracted '
+                 'work was NOT retracted for a misconduct-signal reason (honest error, duplication, etc.) -- '
+                 'scored at half the weight.',
+            tag="mid-any-retr",
         ))
 
     # --- non-scored review context ---
@@ -833,14 +908,27 @@ def main() -> None:
         cards = []
         tag_counts: dict[str, int] = {}
         for rank, (sc, r) in enumerate(ranked, 1):
-            coauthors = s.run(COAUTHOR_QUERY, doi=r["doi"], reasons=MISCONDUCT_REASONS).data() if r["coauthor_misconduct"] else []
+            mid_coauthors_misconduct = (
+                s.run(COAUTHOR_QUERY, doi=r["doi"], reasons=MISCONDUCT_REASONS, misconduct=True).data()
+                if r["mid_misconduct_count"] else []
+            )
+            mid_coauthors_any = (
+                s.run(COAUTHOR_QUERY, doi=r["doi"], reasons=MISCONDUCT_REASONS, misconduct=False).data()
+                if r["mid_any_count"] else []
+            )
             badges, tags = [], []
             if r["ori_flag"]:
                 badges.append('<span class="badge badge-ori">ORI Finding</span>'); tags.append("ori")
             if r["eoc_flag"]:
                 badges.append('<span class="badge badge-eoc">Expression of Concern</span>'); tags.append("eoc")
-            if r["coauthor_misconduct"] > 0:
-                badges.append(f'<span class="badge badge-flag">Co-author of misconduct work ({r["coauthor_misconduct"]})</span>'); tags.append("coauthor")
+            if r["mid_misconduct_count"] > 0:
+                badges.append(f'<span class="badge badge-flag">Co-author of misconduct work ({r["mid_misconduct_count"]})</span>'); tags.append("mid-misconduct")
+            if r["mid_any_count"] > 0:
+                badges.append(f'<span class="badge badge-flag">Co-author of other retracted work ({r["mid_any_count"]})</span>'); tags.append("mid-any-retr")
+            if r["fl_misconduct_count"] > 0:
+                badges.append(f'<span class="badge badge-flag">👤 1st/last author, misconduct retraction ({r["fl_misconduct_count"]})</span>'); tags.append("fl-misconduct")
+            if r["fl_any_count"] > 0:
+                badges.append(f'<span class="badge badge-flag">👤 1st/last author, other retraction ({r["fl_any_count"]})</span>'); tags.append("fl-any-retr")
             if r["ret_count"] > 0:
                 ret_flags = json.loads(r["ret_flags"] or "[]")
                 n_self = sum(1 for f in ret_flags if f.get("self_citation"))
@@ -853,8 +941,6 @@ def main() -> None:
                 badges.append(f'<span class="badge badge-flag" title="Corrections are often benign -- kept low-weight">Crossref correction ({r["correction_count"]})</span>'); tags.append("correction")
             if r["journal_count"] > 0:
                 badges.append('<span class="badge badge-flag">Journal integrity flag</span>'); tags.append("journal")
-            if r["author_retr_rate_external_n"] > 0:
-                badges.append(f'<span class="badge badge-flag">👤 Main authors of retracted works ({r["author_retr_rate_external_n"]})</span>'); tags.append("author-retr")
             if r["journal_retr_rate_external"] >= HIGH_EXTERNAL_RATE_THRESHOLD:
                 badges.append(f'<span class="badge badge-flag" title="{r["journal_retr_rate_external"]:.1%} real-world retraction rate">📔 High retract rate journal</span>'); tags.append("journal-high-retr")
             if r["publisher_retr_rate"] >= HIGH_EXTERNAL_RATE_THRESHOLD:
@@ -920,7 +1006,7 @@ def main() -> None:
         <div class="chev">▾</div>
       </div>
       <div class="card-b">
-        {render_evidence(r, coauthors, pp_cats, pc_runs)}
+        {render_evidence(r, mid_coauthors_misconduct, mid_coauthors_any, pp_cats, pc_runs)}
       </div>
     </article>''')
     driver.close()

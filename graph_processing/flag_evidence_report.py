@@ -6,16 +6,31 @@ Mirrors tier_a_scoring.py's ranking (sensor flags + explainable graph features)
 and expands every contributing signal into named, sourced evidence:
   - retracted_citation / reference_integrity / journal_integrity / ai_text_tell:
     per-sensor flag examples (as before)
-  - coauthor_other_misconduct: names the specific probable-person co-authors
-    who share a cluster with authors of a misconduct-signal-retracted paper,
-    and which paper/reason. NOTE (important, plan.md §0): this uses the BROAD
-    misconduct-signal reason set (Paper Mill, Fabrication, Image/Results
-    Manipulation, ...) -- the same set retracted_citation_checker.py uses --
-    NOT the narrower, formally-adjudicated `on_misconduct_paper` flag (which
-    is restricted to official-investigation/ORI findings, see plan.md §2.1b).
-    A co-author appearing here means "shares a cluster with someone who wrote
-    a paper retracted for a misconduct-signal reason," not "formally
-    adjudicated." Keep that distinction in any human-facing copy.
+  - MERGED 2026-07-22 (user request): coauthor_other_misconduct and
+    author_retr_rate_external used to be two separate signals -- one
+    graph-internal/fuzzy-cluster/any-co-author/misconduct-reason-only, one
+    ORCID-strict/first-last-only/any-reason -- now unified into 4 count-based
+    minmax buckets split by AUTHOR POSITION (first/last vs middle) x
+    SEVERITY (misconduct-reason vs any other reason), in a 1:2:2:4 ratio:
+      - fl_any_count / fl_misconduct_count: a first/last author who
+        co-authored OTHER retracted work, ORCID-matched against the full
+        external Retraction Watch db (author_retraction_rate_external.py).
+        NOTE (plan.md §0): this is still evidence about the PERSON's other
+        work, not this paper.
+      - mid_any_count / mid_misconduct_count: a MIDDLE co-author who shares
+        a probable-person cluster with authors of some OTHER retracted paper
+        found elsewhere in this graph (coauthor_retraction_severity.py) --
+        the same fuzzy-cluster, graph-internal discipline the old
+        coauthor_other_misconduct used, restricted now to middle positions
+        only (first/last moved to the stricter ORCID path above). Misconduct
+        here uses the same BROAD misconduct-signal reason set (Paper Mill,
+        Fabrication, Image/Results Manipulation, ...) as everywhere else in
+        this pipeline -- NOT the narrower, formally-adjudicated
+        `on_misconduct_paper` flag (restricted to official-investigation/ORI
+        findings, see plan.md §2.1b). A co-author appearing here means
+        "shares a cluster with someone who wrote a paper retracted for a
+        misconduct-signal reason," not "formally adjudicated." Keep that
+        distinction in any human-facing copy.
   - institution_retr_rate: the (worst) involved institution's measured
     retraction rate in this graph -- unscored context only (2026-07-22:
     replaced in scoring by institution_retr_rate_external below, since this
@@ -28,11 +43,6 @@ and expands every contributing signal into named, sourced evidence:
     NOT scoped to our own graph) -- see institution_retraction_rate.py /
     publisher_retraction_rate.py / country_retraction_rate.py /
     journal_retraction_rate_external.py.
-  - author_retr_rate_external: a FIRST or LAST author's OWN retraction RATE
-    (see tier_a_scoring.py's WEIGHTS comment for the full 2026-07-22 retuning
-    history) -- their ORCID-claimed works as denominator, Retraction Watch
-    matched by DOI (not name) as numerator -- see
-    author_retraction_rate_external.py.
   - NOTE (removed 2026-07-22): the graph-internal `journal_retr_rate` used to
     be scored here too, but it and journal_integrity_flag_count's check 3
     (journal_integrity_check.py) measure the SAME underlying fact -- this
@@ -92,7 +102,10 @@ RETURN p.doi AS doi,
        coalesce(p.reference_integrity_flag_count, 0) AS ref_count,
        coalesce(p.journal_integrity_flag_count, 0) AS journal_count,
        coalesce(p.ai_text_tell_flag_count, 0) AS ai_count,
-       coalesce(p.coauthor_other_misconduct, 0) AS coauthor_misconduct,
+       coalesce(p.mid_any_count, 0) AS mid_any_count,
+       coalesce(p.mid_misconduct_count, 0) AS mid_misconduct_count,
+       coalesce(p.fl_any_count, 0) AS fl_any_count,
+       coalesce(p.fl_misconduct_count, 0) AS fl_misconduct_count,
        coalesce(p.institution_retr_rate, 0.0) AS institution_retr_rate,
        p.institution_retr_rate_name AS institution_retr_rate_name,
        p.institution_retr_rate_n AS institution_retr_rate_n,
@@ -119,11 +132,16 @@ RETURN p.doi AS doi,
        p.country_retr_rate_n AS country_retr_rate_n,
        coalesce(p.journal_retr_rate_external, 0.0) AS journal_retr_rate_external,
        p.journal_retr_rate_external_n AS journal_retr_rate_external_n,
-       coalesce(p.author_retr_rate_external, 0.0) AS author_retr_rate_external,
-       p.author_retr_rate_external_name AS author_retr_rate_external_name,
-       p.author_retr_rate_external_position AS author_retr_rate_external_position,
-       coalesce(p.author_retr_rate_external_n, 0) AS author_retr_rate_external_n,
-       p.author_retr_rate_external_total AS author_retr_rate_external_total,
+       p.first_author_name AS first_author_name,
+       coalesce(p.first_author_retr_n, 0) AS first_author_retr_n,
+       coalesce(p.first_author_retr_misconduct_n, 0) AS first_author_retr_misconduct_n,
+       p.first_author_retr_rate AS first_author_retr_rate,
+       p.first_author_retr_total AS first_author_retr_total,
+       p.last_author_name AS last_author_name,
+       coalesce(p.last_author_retr_n, 0) AS last_author_retr_n,
+       coalesce(p.last_author_retr_misconduct_n, 0) AS last_author_retr_misconduct_n,
+       p.last_author_retr_rate AS last_author_retr_rate,
+       p.last_author_retr_total AS last_author_retr_total,
        coalesce(p.crossref_correction_count, 0) AS correction_count,
        p.crossref_correction_dois AS correction_dois,
        p.gds_misconduct_prob AS gds_prob,
@@ -134,16 +152,28 @@ RETURN p.doi AS doi,
        p.ai_text_tell_flags AS ai_flags
 """
 
-COAUTHOR_MISCONDUCT_QUERY = """
-MATCH (p:Paper {doi: $doi})<-[:WROTE]-(a:AuthorInstance)
+# Restricted to MIDDLE position (2026-07-22) -- first/last co-authors moved
+# to the ORCID-strict author_retraction_rate_external.py path; see this
+# file's module docstring for the merge. A cluster with BOTH a misconduct-
+# reason and a non-misconduct-reason retracted paper elsewhere counts ONLY
+# as misconduct (mirrors coauthor_retraction_severity.py's mutually-
+# exclusive mid_any_count/mid_misconduct_count split) -- $misconduct=true
+# returns clusters with >=1 misconduct-reason paper; $misconduct=false
+# returns clusters with ZERO misconduct-reason papers among their retracted-
+# elsewhere work.
+COAUTHOR_SEVERITY_QUERY = """
+MATCH (p:Paper {doi: $doi})<-[:WROTE {author_position: 'middle'}]-(a:AuthorInstance)
 WITH p, collect(DISTINCT a.cluster_id) AS clusters
 UNWIND clusters AS cid
 MATCH (mate:AuthorInstance {cluster_id: cid})-[:WROTE]->(mp:Paper)-[:RETRACTED_FOR]->(r:Reason)
-WHERE mp <> p AND r.code IN $reasons
-WITH mate.name AS coauthor_name, mate.cluster_id AS cluster_id,
-     collect(DISTINCT mp.doi)[0..2] AS example_dois,
-     collect(DISTINCT r.code) AS reasons
-RETURN coauthor_name, cluster_id, example_dois, reasons
+WHERE mp <> p
+WITH mate.name AS coauthor_name, cid AS cluster_id, mp, collect(DISTINCT r.code) AS codes
+WITH coauthor_name, cluster_id, mp, any(c IN codes WHERE c IN $reasons) AS mp_is_misconduct
+WITH coauthor_name, cluster_id,
+     collect(DISTINCT mp.doi) AS example_dois,
+     any(f IN collect(mp_is_misconduct) WHERE f) AS has_misconduct
+WHERE has_misconduct = $misconduct
+RETURN coauthor_name, cluster_id, example_dois[0..2] AS example_dois
 ORDER BY coauthor_name
 LIMIT 6
 """
@@ -156,12 +186,14 @@ def calculate_score(row: dict) -> float:
         # reference_integrity_flag_count deliberately excluded -- see tier_a_scoring.py WEIGHTS comment
         row["journal_count"] * WEIGHTS["journal_integrity_flag_count"] +
         row["ai_count"] * WEIGHTS["ai_text_tell_flag_count"] +
-        row["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"] +
+        minmax_contribution("mid_any_count", row["mid_any_count"]) +
+        minmax_contribution("mid_misconduct_count", row["mid_misconduct_count"]) +
+        minmax_contribution("fl_any_count", row["fl_any_count"]) +
+        minmax_contribution("fl_misconduct_count", row["fl_misconduct_count"]) +
         minmax_contribution("institution_retr_rate_external", row["institution_retr_rate_external"]) +
         minmax_contribution("publisher_retr_rate", row["publisher_retr_rate"]) +
         minmax_contribution("country_retr_rate", row["country_retr_rate"]) +
         minmax_contribution("journal_retr_rate_external", row["journal_retr_rate_external"]) +
-        minmax_contribution("author_retr_rate_external", row["author_retr_rate_external"]) +
         row["correction_count"] * WEIGHTS["crossref_correction_flag_count"]
     )
 
@@ -271,28 +303,77 @@ def main() -> None:
                     "examples": [f.get("pattern") for f in ai_flags[:3]],
                 })
 
-            if row["coauthor_misconduct"] > 0:
+            if row["mid_misconduct_count"] > 0:
                 coauthors = s.run(
-                    COAUTHOR_MISCONDUCT_QUERY, doi=row["doi"], reasons=MISCONDUCT_REASONS
+                    COAUTHOR_SEVERITY_QUERY, doi=row["doi"], reasons=MISCONDUCT_REASONS, misconduct=True
                 ).data()
+                corpus_max = get_corpus_max("mid_misconduct_count")
                 flags_summary.append({
-                    "type": "coauthor_other_misconduct",
-                    "count": row["coauthor_misconduct"],
-                    "weight": WEIGHTS["coauthor_other_misconduct"],
-                    "contribution": row["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"],
-                    "note": ("Shares a probable-person cluster with co-author(s) who wrote a "
-                             "paper retracted for a misconduct-signal reason. This is NOT the "
-                             "narrower formally-adjudicated flag (official investigation/ORI) -- "
-                             "see plan.md §2.1b. Same person ≠ same responsibility (§0)."),
+                    "type": "mid_misconduct_count",
+                    "count": row["mid_misconduct_count"],
+                    "corpus_max": corpus_max,
+                    "target_max_score": WEIGHTS["mid_misconduct_minmax_target"],
+                    "contribution": round(minmax_contribution("mid_misconduct_count", row["mid_misconduct_count"]), 2),
+                    "note": ("Shares a probable-person cluster (middle author, fuzzy-matched, NOT strict "
+                             "ORCID) with co-author(s) who wrote a paper retracted for a misconduct-signal "
+                             "reason. This is NOT the narrower formally-adjudicated flag (official "
+                             "investigation/ORI) -- see plan.md §2.1b. Same person ≠ same responsibility (§0). "
+                             "Minmax-scaled against the worst-in-corpus middle-co-author count "
+                             f"({corpus_max:g}), which scores {WEIGHTS['mid_misconduct_minmax_target']}."),
                     "examples": [
-                        {
-                            "coauthor_name": c["coauthor_name"],
-                            "misconduct_paper_dois": c["example_dois"],
-                            "misconduct_reasons": c["reasons"],
-                        }
+                        {"coauthor_name": c["coauthor_name"], "misconduct_paper_dois": c["example_dois"]}
                         for c in coauthors
                     ],
                 })
+
+            if row["mid_any_count"] > 0:
+                coauthors = s.run(
+                    COAUTHOR_SEVERITY_QUERY, doi=row["doi"], reasons=MISCONDUCT_REASONS, misconduct=False
+                ).data()
+                corpus_max = get_corpus_max("mid_any_count")
+                flags_summary.append({
+                    "type": "mid_any_count",
+                    "count": row["mid_any_count"],
+                    "corpus_max": corpus_max,
+                    "target_max_score": WEIGHTS["mid_any_minmax_target"],
+                    "contribution": round(minmax_contribution("mid_any_count", row["mid_any_count"]), 2),
+                    "note": ("Shares a probable-person cluster (middle author, fuzzy-matched) with "
+                             "co-author(s) who wrote a paper retracted for a NON-misconduct reason "
+                             "(honest error, duplication, etc.) -- half the weight of mid_misconduct_count. "
+                             "Minmax-scaled against the worst-in-corpus middle-co-author count "
+                             f"({corpus_max:g}), which scores {WEIGHTS['mid_any_minmax_target']}."),
+                    "examples": [
+                        {"coauthor_name": c["coauthor_name"], "paper_dois": c["example_dois"]}
+                        for c in coauthors
+                    ],
+                })
+
+            if row["fl_misconduct_count"] > 0 or row["fl_any_count"] > 0:
+                for position, name_key, n_key, mc_key in (
+                    ("first", "first_author_name", "first_author_retr_n", "first_author_retr_misconduct_n"),
+                    ("last", "last_author_name", "last_author_retr_n", "last_author_retr_misconduct_n"),
+                ):
+                    if row[n_key] == 0:
+                        continue
+                    is_misconduct = row[mc_key] > 0
+                    key = "fl_misconduct_count" if is_misconduct else "fl_any_count"
+                    target_key = "fl_misconduct_minmax_target" if is_misconduct else "fl_any_minmax_target"
+                    corpus_max = get_corpus_max(key)
+                    flags_summary.append({
+                        "type": f"{key}_{position}",
+                        "position": position,
+                        "count": 1,
+                        "corpus_max": corpus_max,
+                        "target_max_score": WEIGHTS[target_key],
+                        "contribution": round(minmax_contribution(key, 1), 2),
+                        "note": (f"{row[name_key]} ({position} author): {row[n_key]} of their ORCID-claimed "
+                                 f"works were retracted per Retraction Watch ({row[mc_key]} misconduct-coded), "
+                                 "matched by DOI against their own ORCID record, not by name. Same person ≠ "
+                                 "same responsibility (§0): this is the author's track record across ALL their "
+                                 f"claimed work, not a finding about this paper. Minmax-scaled: the worst-in-"
+                                 f"corpus count of qualifying first/last positions ({corpus_max:g}) scores "
+                                 f"{WEIGHTS[target_key]}; this position contributes 1 unit toward that."),
+                    })
 
             if row["institution_retr_rate"] > 0:
                 flags_summary.append({
@@ -413,25 +494,6 @@ def main() -> None:
                              f"scores {WEIGHTS['journal_retr_rate_external_minmax_target']}."),
                 })
 
-            if row["author_retr_rate_external_n"] > 0:
-                corpus_max = get_corpus_max("author_retr_rate_external")
-                flags_summary.append({
-                    "type": "author_retr_rate_external",
-                    "count": row["author_retr_rate_external_n"],
-                    "value": round(row["author_retr_rate_external"], 5),
-                    "corpus_max": round(corpus_max, 5),
-                    "target_max_score": WEIGHTS["author_retr_rate_external_minmax_target"],
-                    "contribution": round(minmax_contribution("author_retr_rate_external", row["author_retr_rate_external"]), 2),
-                    "note": (f"{row['author_retr_rate_external_n']} out of {row['author_retr_rate_external_name']}'s "
-                             f"({row['author_retr_rate_external_position']} author) "
-                             f"{row['author_retr_rate_external_total']} ORCID-claimed works were retracted "
-                             f"({row['author_retr_rate_external']:.1%}), per Retraction Watch -- matched by DOI "
-                             "against their own ORCID record, not by name. Same person ≠ same responsibility (§0): "
-                             "this is the author's track record across ALL their claimed work, not a finding about "
-                             "this paper. Minmax-scaled against the worst first/last author in this corpus "
-                             f"({corpus_max:.1%}), who scores {WEIGHTS['author_retr_rate_external_minmax_target']}."),
-                })
-
             if row["correction_count"] > 0:
                 correction_dois = json.loads(row["correction_dois"] or "[]")
                 flags_summary.append({
@@ -476,9 +538,10 @@ def main() -> None:
             label = flag["type"]
             contrib = flag.get("contribution", 0)
             print(f"    • {label}: +{contrib:.2f} score", file=sys.stderr)
-            if label == "coauthor_other_misconduct":
+            if label in ("mid_misconduct_count", "mid_any_count"):
                 for ex in flag["examples"]:
-                    print(f"        - {ex['coauthor_name']}  (see {ex['misconduct_paper_dois']})", file=sys.stderr)
+                    dois = ex.get("misconduct_paper_dois") or ex.get("paper_dois")
+                    print(f"        - {ex['coauthor_name']}  (see {dois})", file=sys.stderr)
 
 
 if __name__ == "__main__":

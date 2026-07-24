@@ -29,8 +29,38 @@ pubmed_erratum_flag: 0.3                  # weak signal -- most errata are benig
 ori_finding_flag: 4.0                     # federal ORI misconduct finding naming this exact DOI -- strongest fact-based signal
 
 # graph features (Neo4j)
-coauthor_other_misconduct: 1.5            # per probable-person co-author with a misconduct paper elsewhere
 crossref_correction_flag_count: 0.3       # Crossref-deposited correction notices on this DOI; low weight, often benign
+
+# coauthor_other_misconduct (flat 1.5/co-author, uncapped) REMOVED 2026-07-22,
+# user request: merged with author_retr_rate_external into one unified
+# "co-author has other retracted work" model, split by AUTHOR POSITION
+# (first/last vs middle) and by SEVERITY (misconduct-reason vs any other
+# reason) instead of by matching discipline. User's framing: 1st/last authors
+# score 2x a middle co-author; a misconduct-reason retraction scores 2x an
+# any-reason one. That gives four buckets in a 1:2:2:4 ratio (mid_any :
+# mid_misconduct == fl_any : fl_misconduct == 1:2), computed by
+# author_retraction_rate_external.py (first/last, ORCID-strict, external
+# Retraction Watch) and coauthor_retraction_severity.py (middle, fuzzy
+# probable-person cluster, graph-internal) respectively.
+# MINMAX, not flat/uncapped, same reasoning as the five entity-rate signals
+# below: literal "+2/+4 points per retracted work" would have let one
+# extremely prolific author (one first/last author in this corpus has 248
+# ORCID-claimed works flagged retracted) dominate every paper they appear on
+# by 40-80x anything else in the system. Minmax-scaling the per-paper COUNT
+# of qualifying positions/co-authors (not the underlying person's own total
+# retraction tally) sidesteps that: for fl_any/fl_misconduct the count is
+# naturally 0-2 (only two slots per paper) so minmax barely differs from a
+# flat per-position score; for mid_any/mid_misconduct the count can run
+# higher (a paper's own author-list size), so minmax's usual "worst-in-corpus
+# anchors the target, everyone else proportionally less" protection matters
+# there. Checked live before shipping: current corpus maxima are mid_any=?,
+# mid_misconduct=?, fl_any=2, fl_misconduct=2 (see coauthor_retraction_
+# severity.py's / author_retraction_rate_external.py's own verification
+# printout for current numbers -- re-check whenever these are re-run).
+mid_any_minmax_target: 2.5          # middle co-author, ANY-reason retraction elsewhere (graph-internal, fuzzy cluster)
+mid_misconduct_minmax_target: 5.0   # middle co-author, MISCONDUCT-reason retraction elsewhere (2x mid_any)
+fl_any_minmax_target: 5.0           # 1st/last author, ANY-reason retraction elsewhere (external, ORCID-strict; 2x mid_any)
+fl_misconduct_minmax_target: 10.0   # 1st/last author, MISCONDUCT-reason retraction elsewhere (4x mid_any, 2x fl_any)
 
 # journal_retr_rate (graph-internal) REMOVED 2026-07-22: it and
 # journal_integrity_flag_count's check 3 (>10% retraction-rate threshold,
@@ -43,12 +73,14 @@ crossref_correction_flag_count: 0.3       # Crossref-deposited correction notice
 
 # ENTITY-LEVEL RETRACTION RATES (institution_retraction_rate.py /
 # publisher_retraction_rate.py / country_retraction_rate.py /
-# journal_retraction_rate_external.py / author_retraction_rate_external.py):
-# institution_retr_rate is graph-internal (biased toward our own retraction-
-# seeded corpus, so typical values run 0.3-1.0); the other four use the FULL
-# Retraction Watch csv as numerator against a Crossref/OpenAlex/ORCID
-# external denominator -- real-world scale, typical values ~0.001-0.08 (or
-# up to ~0.4 for a repeat-offender author).
+# journal_retraction_rate_external.py). author_retraction_rate_external.py
+# USED to be a fifth rate-based member of this family; as of 2026-07-22 its
+# scored output was replaced by the count-based fl_any/fl_misconduct minmax
+# targets above (merged with coauthor_other_misconduct) -- see that section's
+# comment. institution_retr_rate is graph-internal (biased toward our own
+# retraction-seeded corpus, so typical values run 0.3-1.0); the other three
+# use the FULL Retraction Watch csv as numerator against a Crossref/OpenAlex
+# external denominator -- real-world scale, typical values ~0.001-0.08.
 #
 # WEIGHTING HISTORY, all 2026-07-22 (same day these were added):
 #   1. Original: plain linear weights (1.5/1.0/2.0-ish), "small absolute
@@ -83,16 +115,16 @@ crossref_correction_flag_count: 0.3       # Crossref-deposited correction notice
 # else is honestly proportional to it. TRADEOFF worth knowing: minmax is MORE
 # sensitive to a single new extreme outlier than a fixed cap was, since that
 # outlier becomes the anchor for every other entity's score in its category,
-# not just its own -- checked live before shipping that all five current
+# not just its own -- checked live before shipping that all four current
 # maxima are backed by reasonably large samples (see tier_a_scoring.py's
 # module docstring for the exact numbers), not a fragile single-paper
 # artifact, but re-check this if a future run's max looks like it might be
 # based on a tiny/noisy sample.
-# There's also a conceptual reason these five are treated specially, separate
+# There's also a conceptual reason these four are treated specially, separate
 # from the heavy-tail/numeric problem: an institution/publisher/country/
-# journal/author's aggregate rate is evidence about the ENTITY, not about
-# THIS paper -- same ecological-not-direct category as
-# coauthor_other_misconduct (plan.md §0: same person/place ≠ same
+# journal's aggregate rate is evidence about the ENTITY, not about
+# THIS paper -- same ecological-not-direct category as the fl_*/mid_*
+# co-author signals above (plan.md §0: same person/place ≠ same
 # responsibility) -- so it must never be able to outrank direct per-paper
 # evidence (an ORI finding, this paper's own AI-text tells) on entity
 # association alone. The raw rate is still shown in the evidence text; only
@@ -123,7 +155,6 @@ publisher_retr_rate_minmax_target: 10.0
 # ecological, paper-non-specific bucket can contribute.
 country_retr_rate_minmax_target: 2.5
 journal_retr_rate_external_minmax_target: 10.0
-author_retr_rate_external_minmax_target: 10.0
 
 # paperconan (filesystem-derived, see load_paperconan_runs() in tier_a_scoring.py)
 # Only these two ADJUDICATED verdicts are scored -- never raw high/medium/low counts.

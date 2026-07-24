@@ -1,20 +1,31 @@
 #!/usr/bin/env python3
 """
 author_retraction_rate_external.py — Tier-A graph feature: a FIRST or LAST
-author's own personal retraction rate, from EXTERNAL, unbiased sources
-(2026-07-22, same "denominator problem" family as publisher_retraction_
-rate.py / country_retraction_rate.py / journal_retraction_rate_external.py --
-see that docstring for the shared background).
+author's own retraction history, from EXTERNAL, unbiased sources (2026-07-22,
+same "denominator problem" family as publisher_retraction_rate.py /
+country_retraction_rate.py / journal_retraction_rate_external.py -- see that
+docstring for the shared background).
 
-WHY FIRST/LAST ONLY, NOT EVERY CO-AUTHOR: the user's own framing for this
-request -- the first author typically did the hands-on work, the last
-author is conventionally the senior figure who supervised/vouches for it;
-a middle author's role is far more variable and less attributable.
+MERGED 2026-07-22 (user request) with what used to be a separate signal,
+coauthor_other_misconduct: that field is graph-internal, cluster-matched
+(fuzzy "probable person," not ORCID), and counts ANY co-author regardless of
+position. This sensor is the ORCID-strict, first/last-only, EXTERNAL half of
+the merged model; the middle-author, fuzzy-cluster half now lives in
+coauthor_retraction_severity.py. The two are combined only at scoring time
+(tier_a_scoring.py's MINMAX_KEYS: fl_any_count/fl_misconduct_count here,
+mid_any_count/mid_misconduct_count from the other script) -- kept as separate
+sensors because they use fundamentally different matching disciplines and
+scopes, not because the underlying "did this person co-author other
+retracted work" question is different.
+
+WHY FIRST/LAST ONLY, NOT EVERY CO-AUTHOR: the first author typically did the
+hands-on work, the last author is conventionally the senior figure who
+supervised/vouches for it; a middle author's role is far more variable and
+less attributable -- and ORCID-strict matching for every middle author would
+also multiply the ORCID API call volume several-fold for comparatively little
+gain in confidence over the fuzzy-cluster approach already used for them.
 WROTE.author_position ('first'/'last'/'middle', from extract_enrich.py's
-parse of each paper's author list order) already carries this. Restricting
-scope here is a deliberate choice to keep this closer to "direct
-responsibility" evidence and away from coauthor_other_misconduct's already-
-covered "shares a cluster with SOMEONE who..." ecological territory.
+parse of each paper's author list order) already carries this.
 
 WHY THIS NEEDS A DIFFERENT RECIPE THAN JOURNAL/PUBLISHER/COUNTRY: those three
 match a NAME (journal title, publisher name, country) against
@@ -41,8 +52,14 @@ denominator by DOI, never by name:
     exceed 100% by construction (the numerator is a strict subset of the
     denominator) -- unlike the journal/publisher sensors, no ">1.0
     implausible rate" discard logic is needed here.
+  - SEVERITY SPLIT (new): of those retracted DOIs, how many carry a
+    MISCONDUCT-coded Reason (same MISCONDUCT_REASONS list used everywhere
+    else in this pipeline -- retraction_watch.csv's own semicolon-separated
+    "Reason" column, string-matched, not re-derived). A retraction with a
+    misconduct reason is scored higher than one without (fabrication/paper
+    mill/ORI finding vs. an honest error or duplication).
 
-Authors WITHOUT an orcid on file are left with a null rate -- never guessed
+Authors WITHOUT an orcid on file are left with null fields -- never guessed
 via name matching, never silently 0 (plan.md §0). Measured 2026-07-22: of
 this graph's first/last-author instances, 1,359/2,067 (66%) first authors
 and 1,620/1,994 (81%) last authors carry an orcid; 1,994 distinct ORCIDs
@@ -54,17 +71,20 @@ computed once the ORCID record claims >= MIN_CLAIMED_WORKS DOIs; below
 LOW_CONFIDENCE_CLAIMED_WORKS the rate is still shown but flagged
 low-confidence (same idiom as publisher/journal's LOW_CONFIDENCE_TOTAL_DOIS).
 
-NOT capped, unlike publisher/country/journal_retr_rate_external: those three
-needed a hard ceiling because their rates are ~0.01%-1% typical vs 8%-26%
-extreme-tail, forcing a weight multiplier (100x-1000x) that would otherwise
-let the tail explode. An author's personal rate is already on the same
-[0,1] percentage SCALE as institution_retr_rate (typical single digits to
-tens of percent) -- no multiplier is needed, so no cap is needed either; see
-tier_a_scoring.py's WEIGHTS comment for why it sits in that "graph feature"
-tier instead. Still ecological-ish, not direct, per plan.md §0 (this
-person's OTHER papers ≠ this paper's guilt) -- same caveat family as
-coauthor_other_misconduct -- so it is kept at a comparably modest weight,
-not the top tier (ori_finding_flag / paperconan_confirmed).
+PER-POSITION, NOT COLLAPSED TO ONE "WORST" (changed 2026-07-22): a paper's
+first AND last author are tracked and scored independently now (fl_any_count/
+fl_misconduct_count on Paper can be 0, 1, or 2), instead of the previous
+"keep only whichever of the two has the higher rate" collapse -- needed so
+"each" in the user's scoring request (one point value per QUALIFYING position,
+not just the single worst one) is literal. See tier_a_scoring.py's
+MINMAX_KEYS / minmax_contribution() for how fl_any_count/fl_misconduct_count
+turn into a score: each is minmax-scaled against its own worst-in-corpus
+COUNT (naturally 0-2, since there are only two first/last slots per paper),
+not against a raw uncapped per-person retraction tally -- checked live before
+shipping that this avoids the single-author-domination failure mode a flat
+"+N points per retracted work" scheme would hit (one prolific author in this
+corpus has 248 ORCID-claimed works flagged retracted; scoring that literally
+would have made one signal 40-80x bigger than everything else combined).
 
 Idempotent: recomputes AuthorInstance and Paper properties from scratch
 every run. One ORCID API call per DISTINCT first/last-author ORCID in the
@@ -98,19 +118,43 @@ RW_CSV_PATH = (REPO_ROOT / cfg["data"]["retraction_watch_csv"]).resolve()
 MIN_CLAIMED_WORKS = 3
 LOW_CONFIDENCE_CLAIMED_WORKS = 10
 
+# Same list used by coauthor_retraction_severity.py / gds_node_classification.py
+# -- kept as a local copy (established convention in this pipeline: each
+# sensor duplicates this constant rather than sharing a module) but MUST stay
+# in sync with both.
+MISCONDUCT_REASONS = {
+    "Misconduct - Official Investigation(s) and/or Finding(s)",
+    "Investigation by ORI",
+    "Paper Mill",
+    "Falsification/Fabrication of Data",
+    "Falsification/Fabrication of Image",
+    "Falsification/Fabrication of Results",
+    "Manipulation of Images",
+    "Manipulation of Results",
+    "Euphemisms for Misconduct",
+    "Misconduct by Author",
+}
 
-def load_rw_doi_set() -> set[str]:
-    """Every OriginalPaperDOI in the FULL retraction_watch.csv, canonicalized
-    -- deliberately NOT filtered to data.seed_subset (unbiased, same
-    reasoning as publisher_retraction_rate.py). DOI-to-DOI matching only --
-    no name matching anywhere in this sensor."""
-    dois: set[str] = set()
+
+def load_rw_reason_map() -> dict[str, bool]:
+    """{OriginalPaperDOI: is_misconduct} for every retracted DOI in the FULL
+    retraction_watch.csv, canonicalized -- deliberately NOT filtered to
+    data.seed_subset (unbiased, same reasoning as publisher_retraction_
+    rate.py). DOI-to-DOI matching only -- no name matching anywhere in this
+    sensor. is_misconduct is True iff ANY of the semicolon-separated Reason
+    codes for that DOI is in MISCONDUCT_REASONS."""
+    reasons: dict[str, bool] = {}
     with RW_CSV_PATH.open(encoding="utf-8", errors="replace") as f:
         for row in csv.DictReader(f):
             d = canon_doi(row.get("OriginalPaperDOI", ""))
-            if d:
-                dois.add(d)
-    return dois
+            if not d:
+                continue
+            codes = {c.strip() for c in (row.get("Reason", "") or "").split(";") if c.strip()}
+            is_misconduct = bool(codes & MISCONDUCT_REASONS)
+            # A DOI can appear more than once (multi-part retraction notices) --
+            # OR the misconduct flags together rather than overwrite.
+            reasons[d] = reasons.get(d, False) or is_misconduct
+    return reasons
 
 
 def main() -> None:
@@ -118,8 +162,9 @@ def main() -> None:
     driver = GraphDatabase.driver(conn["uri"], auth=(conn["user"], conn["password"]))
 
     print("[author_retraction_rate_external] loading full retraction_watch.csv (unfiltered)...", file=sys.stderr)
-    rw_dois = load_rw_doi_set()
-    print(f"  {len(rw_dois)} distinct retracted DOIs", file=sys.stderr)
+    rw_reasons = load_rw_reason_map()
+    print(f"  {len(rw_reasons)} distinct retracted DOIs "
+          f"({sum(rw_reasons.values())} misconduct-coded)", file=sys.stderr)
 
     with driver.session(database=conn["database"]) as s:
         orcids = [
@@ -151,21 +196,24 @@ def main() -> None:
             claimed = client.get_claimed_dois(orcid)
         except (requests.RequestException, ValueError, KeyError) as e:
             errors += 1
-            results.append({"orcid": orcid, "rate": None, "n_retracted": 0, "n_total": None, "low_confidence": None})
+            results.append({"orcid": orcid, "rate": None, "n_retracted": 0, "n_misconduct": 0,
+                             "n_total": None, "low_confidence": None})
             if errors <= 10:
                 print(f"  [{i}/{len(orcids)}] ORCID {orcid}: lookup failed ({e})", file=sys.stderr)
             continue
 
         total = len(claimed)
         if total < MIN_CLAIMED_WORKS:
-            results.append({"orcid": orcid, "rate": None, "n_retracted": 0, "n_total": total, "low_confidence": None})
+            results.append({"orcid": orcid, "rate": None, "n_retracted": 0, "n_misconduct": 0,
+                             "n_total": total, "low_confidence": None})
             continue
 
-        retracted = [d for d in claimed if d in rw_dois]
+        retracted = [d for d in claimed if d in rw_reasons]
+        n_misconduct = sum(1 for d in retracted if rw_reasons[d])
         rate = len(retracted) / total
         results.append({
-            "orcid": orcid, "rate": rate, "n_retracted": len(retracted), "n_total": total,
-            "low_confidence": total < LOW_CONFIDENCE_CLAIMED_WORKS,
+            "orcid": orcid, "rate": rate, "n_retracted": len(retracted), "n_misconduct": n_misconduct,
+            "n_total": total, "low_confidence": total < LOW_CONFIDENCE_CLAIMED_WORKS,
         })
         if i % 50 == 0:
             print(f"  [{i}/{len(orcids)}]", file=sys.stderr)
@@ -177,42 +225,66 @@ def main() -> None:
                 MATCH (a:AuthorInstance {orcid: $orcid})
                 SET a.author_retr_rate_external = $rate,
                     a.author_retr_count_external = $n_retracted,
+                    a.author_retr_misconduct_count_external = $n_misconduct,
                     a.author_total_claimed_works = $n_total,
                     a.author_low_confidence = $low_confidence,
                     a.author_rate_checked_date = $today
                 """,
                 orcid=r["orcid"], rate=r["rate"], n_retracted=r["n_retracted"],
-                n_total=r["n_total"], low_confidence=r["low_confidence"], today=today,
+                n_misconduct=r["n_misconduct"], n_total=r["n_total"],
+                low_confidence=r["low_confidence"], today=today,
             )
 
-        print("[author_retraction_rate_external] per-paper max across first/last authors...", file=sys.stderr)
+        print("[author_retraction_rate_external] per-paper first/last positions (independent, not collapsed)...",
+              file=sys.stderr)
         s.run(
             """
             MATCH (p:Paper)
-            SET p.author_retr_rate_external = null,
-                p.author_retr_rate_external_n = null,
-                p.author_retr_rate_external_total = null,
-                p.author_retr_rate_external_name = null,
-                p.author_retr_rate_external_position = null,
-                p.author_retr_rate_external_low_confidence = null
+            SET p.first_author_name = null, p.first_author_retr_rate = null,
+                p.first_author_retr_n = null, p.first_author_retr_misconduct_n = null,
+                p.first_author_retr_total = null, p.first_author_low_confidence = null,
+                p.last_author_name = null, p.last_author_retr_rate = null,
+                p.last_author_retr_n = null, p.last_author_retr_misconduct_n = null,
+                p.last_author_retr_total = null, p.last_author_low_confidence = null,
+                p.fl_any_count = 0, p.fl_misconduct_count = 0
             """
         ).consume()
         s.run(
             """
             MATCH (a:AuthorInstance)-[w:WROTE]->(p:Paper)
-            WHERE w.author_position IN ['first','last']
-              AND a.author_retr_rate_external IS NOT NULL
-            WITH p, a, w ORDER BY a.author_retr_rate_external DESC
-            WITH p, collect({rate: a.author_retr_rate_external, n: a.author_retr_count_external,
-                              total: a.author_total_claimed_works, name: a.name,
-                              position: w.author_position,
-                              low_conf: a.author_low_confidence})[0] AS top
-            SET p.author_retr_rate_external = top.rate,
-                p.author_retr_rate_external_n = top.n,
-                p.author_retr_rate_external_total = top.total,
-                p.author_retr_rate_external_name = top.name,
-                p.author_retr_rate_external_position = top.position,
-                p.author_retr_rate_external_low_confidence = top.low_conf
+            WHERE w.author_position = 'first' AND a.author_retr_rate_external IS NOT NULL
+            SET p.first_author_name = a.name, p.first_author_retr_rate = a.author_retr_rate_external,
+                p.first_author_retr_n = a.author_retr_count_external,
+                p.first_author_retr_misconduct_n = a.author_retr_misconduct_count_external,
+                p.first_author_retr_total = a.author_total_claimed_works,
+                p.first_author_low_confidence = a.author_low_confidence
+            """
+        ).consume()
+        s.run(
+            """
+            MATCH (a:AuthorInstance)-[w:WROTE]->(p:Paper)
+            WHERE w.author_position = 'last' AND a.author_retr_rate_external IS NOT NULL
+            SET p.last_author_name = a.name, p.last_author_retr_rate = a.author_retr_rate_external,
+                p.last_author_retr_n = a.author_retr_count_external,
+                p.last_author_retr_misconduct_n = a.author_retr_misconduct_count_external,
+                p.last_author_retr_total = a.author_total_claimed_works,
+                p.last_author_low_confidence = a.author_low_confidence
+            """
+        ).consume()
+        # fl_any_count/fl_misconduct_count: mutually exclusive per position --
+        # a position with >=1 misconduct-reason retraction counts ONLY in
+        # fl_misconduct_count, never double-counted in fl_any_count too.
+        s.run(
+            """
+            MATCH (p:Paper)
+            SET p.fl_misconduct_count =
+                    (CASE WHEN coalesce(p.first_author_retr_misconduct_n, 0) > 0 THEN 1 ELSE 0 END) +
+                    (CASE WHEN coalesce(p.last_author_retr_misconduct_n, 0) > 0 THEN 1 ELSE 0 END),
+                p.fl_any_count =
+                    (CASE WHEN coalesce(p.first_author_retr_n, 0) > 0 AND coalesce(p.first_author_retr_misconduct_n, 0) = 0
+                          THEN 1 ELSE 0 END) +
+                    (CASE WHEN coalesce(p.last_author_retr_n, 0) > 0 AND coalesce(p.last_author_retr_misconduct_n, 0) = 0
+                          THEN 1 ELSE 0 END)
             """
         ).consume()
 
@@ -220,17 +292,16 @@ def main() -> None:
             """
             MATCH (p:Paper {is_retracted:false})
             RETURN count(*) AS n,
-                   sum(CASE WHEN p.author_retr_rate_external IS NOT NULL THEN 1 ELSE 0 END) AS with_signal,
-                   avg(p.author_retr_rate_external) AS avg_rate
+                   sum(CASE WHEN p.fl_any_count > 0 THEN 1 ELSE 0 END) AS with_any,
+                   sum(CASE WHEN p.fl_misconduct_count > 0 THEN 1 ELSE 0 END) AS with_misconduct
             """
         ).single()
 
     driver.close()
 
     print("\n=== Author retraction rate (external, first/last only) — verification ===", file=sys.stderr)
-    print(f"Not-yet-retracted candidates with an author_retr_rate_external: "
-          f"{dist['with_signal']} / {dist['n']}"
-          + (f"  (avg {dist['avg_rate']:.4f})" if dist['avg_rate'] is not None else ""),
+    print(f"Not-yet-retracted candidates with a qualifying first/last author: "
+          f"{dist['with_any']} any-reason, {dist['with_misconduct']} misconduct-reason (of {dist['n']})",
           file=sys.stderr)
 
     matched = [r for r in results if r["rate"] is not None]
@@ -241,7 +312,8 @@ def main() -> None:
           file=sys.stderr)
     print("\nTop 15 authors by personal external retraction rate:", file=sys.stderr)
     for r in matched[:15]:
-        print(f"  {r['rate']:.1%}  {r['n_retracted']}/{r['n_total']} claimed works retracted"
+        print(f"  {r['rate']:.1%}  {r['n_retracted']}/{r['n_total']} claimed works retracted "
+              f"({r['n_misconduct']} misconduct-coded)"
               f"{' (low confidence)' if r['low_confidence'] else ''}  orcid={r['orcid']}", file=sys.stderr)
 
 

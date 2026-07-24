@@ -90,7 +90,16 @@ Scoring logic:
     shape and weight/cap recipe as publisher_retr_rate/
     journal_retr_rate_external, so this signal now reads on the same scale
     as its siblings instead of being a one-off. The raw retracted-works
-    COUNT is still shown in the evidence text for context.)
+    COUNT is still shown in the evidence text for context.
+    SUPERSEDED 2026-07-22, same day, user request: MERGED with
+    coauthor_other_misconduct into 4 count-based minmax buckets
+    (mid_any_count/mid_misconduct_count/fl_any_count/fl_misconduct_count,
+    see MINMAX_KEYS below and config/weights.yaml) split by author position
+    (first/last vs middle) x severity (misconduct-reason vs any other
+    reason) in a 1:2:2:4 ratio. author_retr_rate_external the RATE still
+    exists on AuthorInstance/Paper (author_retraction_rate_external.py) for
+    display/context, but the SCORED contribution now comes from the count-
+    based fl_* buckets, not this rate.)
   - journal_retr_rate (graph-internal) was REMOVED from the score entirely
     2026-07-22, on user feedback: it and journal_integrity_flag_count's
     check 3 (journal_integrity_check.py) measured the SAME underlying fact
@@ -101,9 +110,13 @@ Scoring logic:
     GDS input feature (gds_node_classification.py) -- only removed from
     Tier-A scoring/display.
   - institution_retr_rate_external / publisher_retr_rate / country_retr_rate /
-    journal_retr_rate_external / author_retr_rate_external are all
-    MINMAX-SCORED (see minmax_contribution() below), not weighted-and-capped.
-    History: these five are entity-level (not per-paper) retraction rates, and
+    journal_retr_rate_external are all MINMAX-SCORED (see
+    minmax_contribution() below), not weighted-and-capped. mid_any_count/
+    mid_misconduct_count/fl_any_count/fl_misconduct_count (the merged
+    coauthor_other_misconduct + author_retr_rate_external replacement, see
+    below) use the same mechanism.
+    History: these four rate-based signals are entity-level (not per-paper)
+    retraction rates, and
     are extremely heavy-tailed (most candidates ~0.01%-1%, a handful of
     Hindawi-family journals/repeat-offender authors sit at 8%-95%), so no
     single linear weight ever worked -- turn it up enough to matter for a
@@ -132,25 +145,28 @@ Scoring logic:
     one real tradeoff worth knowing: minmax is inherently MORE sensitive to a
     single new extreme outlier than a fixed cap was -- one future noisy data
     point becomes the anchor for every other entity's score in that category,
-    not just its own. Checked live before shipping: all five current maxima
-    are backed by reasonably large samples (author 43.5% at n=10/23,
-    publisher 8.4% at n=11,524, journal 31.0% at n=157, country 0.33% at
-    n=2,418; institution_retr_rate_external's max is European Society of
-    Cardiology at 0.101%, n=1/994 -- small numerator but a large denominator,
-    same shape as the other external rates) -- not a fragile single-paper
+    not just its own. Checked live before shipping: all four current maxima
+    (this rate-based family; the count-based fl_*/mid_* buckets are a
+    separate, later addition -- see their own note above and in
+    config/weights.yaml) are backed by reasonably large samples (publisher
+    8.4% at n=11,524, journal 31.0% at n=157, country 0.33% at n=2,418;
+    institution_retr_rate_external's max is European Society of Cardiology
+    at 0.101%, n=1/994 -- small numerator but a large denominator, same
+    shape as the other external rates) -- not a fragile single-paper
     artifact.
-    There is also a conceptual reason these five are treated specially
+    There is also a conceptual reason these four are treated specially
     (unrelated to the numeric heavy-tail problem): a journal/publisher/
-    country/institution/author's aggregate rate is evidence about the ENTITY,
+    country/institution's aggregate rate is evidence about the ENTITY,
     not about THIS paper -- the same ecological-not-direct category as
-    coauthor_other_misconduct (plan.md §0: same person/place ≠ same
-    responsibility) -- so it should never be able to outrank direct per-paper
-    evidence (an ORI finding, this paper's own AI-text tells) purely on
-    venue/author association. The raw rate is still shown in the evidence
-    text/JSON; only the SCORED contribution is minmax-scaled.
+    the fl_*/mid_* co-author signals above (plan.md §0: same person/place ≠
+    same responsibility) -- so it should never be able to outrank direct
+    per-paper evidence (an ORI finding, this paper's own AI-text tells)
+    purely on venue association. The raw rate is still shown in the
+    evidence text/JSON; only the SCORED contribution is minmax-scaled.
 
-Score = sum of (flag_count * weight) for each sensor, with the five signals
-above minmax-scaled per-signal instead (see minmax_contribution()).
+Score = sum of (flag_count * weight) for each sensor, with the entity-rate
+and co-author-severity signals above all minmax-scaled per-signal instead
+(see minmax_contribution()).
 
 Output: CSV with top-N papers sorted by score, including:
   - DOI, title, journal
@@ -259,10 +275,18 @@ DEFAULT_WEIGHTS = {
     "pubmed_erratum_flag": 0.3,
     "ori_finding_flag": 4.0,
     # graph features (Neo4j)
-    "coauthor_other_misconduct": 1.5,   # per probable-person co-author with a misconduct paper elsewhere
     "crossref_correction_flag_count": 0.3,  # Crossref-deposited correction notices on this DOI;
                                              # low weight, corrections are often benign (see refresh_correction_history.py)
-    # The five entity-level retraction-RATE signals below are all MINMAX-SCALED
+    # coauthor_other_misconduct + author_retr_rate_external MERGED 2026-07-22
+    # (user request) into 4 count-based minmax buckets, split by author
+    # position (first/last vs middle) x severity (misconduct-reason vs any
+    # other reason), in a 1:2:2:4 ratio -- see config/weights.yaml's comment
+    # for the full reasoning (why minmax instead of literal flat points).
+    "mid_any_minmax_target": 2.5,
+    "mid_misconduct_minmax_target": 5.0,
+    "fl_any_minmax_target": 5.0,
+    "fl_misconduct_minmax_target": 10.0,
+    # The four entity-level retraction-RATE signals below are all MINMAX-SCALED
     # against their own observed worst-in-corpus value (see minmax_contribution()
     # / MINMAX_KEYS below), not multiplied by a raw weight -- these "_minmax_target"
     # values are each signal's target score for the single worst offender in its
@@ -272,7 +296,6 @@ DEFAULT_WEIGHTS = {
     "publisher_retr_rate_minmax_target": 10.0,         # EXTERNAL rate (graph_processing/publisher_retraction_rate.py)
     "country_retr_rate_minmax_target": 10.0,           # EXTERNAL rate (graph_processing/country_retraction_rate.py)
     "journal_retr_rate_external_minmax_target": 10.0,  # EXTERNAL rate (graph_processing/journal_retraction_rate_external.py)
-    "author_retr_rate_external_minmax_target": 10.0,   # first/last author's own rate (graph_processing/author_retraction_rate_external.py)
     # paperconan (filesystem, not the graph — see load_paperconan_runs() above)
     "paperconan_needs_human": 2.0,      # an opened, quantified anomaly that survived adjudication
     "paperconan_confirmed": 4.0,        # tied with ori_finding_flag as the strongest signal here
@@ -317,7 +340,10 @@ MINMAX_KEYS = {
     "publisher_retr_rate": "publisher_retr_rate_minmax_target",
     "country_retr_rate": "country_retr_rate_minmax_target",
     "journal_retr_rate_external": "journal_retr_rate_external_minmax_target",
-    "author_retr_rate_external": "author_retr_rate_external_minmax_target",
+    "mid_any_count": "mid_any_minmax_target",
+    "mid_misconduct_count": "mid_misconduct_minmax_target",
+    "fl_any_count": "fl_any_minmax_target",
+    "fl_misconduct_count": "fl_misconduct_minmax_target",
 }
 
 # Populated once per run by compute_corpus_maxes(), BEFORE any row is scored --
@@ -381,7 +407,10 @@ RETURN p.doi AS doi,
        CASE WHEN p.ori_finding_doc_url IS NOT NULL THEN 1 ELSE 0 END AS ori_flag,
        p.ori_finding_doc_url AS ori_doc_url,
        p.ori_respondent_name AS ori_respondent,
-       coalesce(p.coauthor_other_misconduct, 0) AS coauthor_misconduct,
+       coalesce(p.mid_any_count, 0) AS mid_any_count,
+       coalesce(p.mid_misconduct_count, 0) AS mid_misconduct_count,
+       coalesce(p.fl_any_count, 0) AS fl_any_count,
+       coalesce(p.fl_misconduct_count, 0) AS fl_misconduct_count,
        coalesce(p.institution_retr_rate, 0.0) AS institution_retr_rate,
        p.institution_retr_rate_name AS institution_retr_rate_name,
        p.institution_retr_rate_n AS institution_retr_rate_n,
@@ -397,11 +426,12 @@ RETURN p.doi AS doi,
        p.country_retr_rate_n AS country_retr_rate_n,
        coalesce(p.journal_retr_rate_external, 0.0) AS journal_retr_rate_external,
        p.journal_retr_rate_external_n AS journal_retr_rate_external_n,
-       coalesce(p.author_retr_rate_external, 0.0) AS author_retr_rate_external,
-       p.author_retr_rate_external_name AS author_retr_rate_external_name,
-       p.author_retr_rate_external_position AS author_retr_rate_external_position,
-       coalesce(p.author_retr_rate_external_n, 0) AS author_retr_rate_external_n,
-       p.author_retr_rate_external_total AS author_retr_rate_external_total,
+       p.first_author_name AS first_author_name,
+       coalesce(p.first_author_retr_n, 0) AS first_author_retr_n,
+       coalesce(p.first_author_retr_misconduct_n, 0) AS first_author_retr_misconduct_n,
+       p.last_author_name AS last_author_name,
+       coalesce(p.last_author_retr_n, 0) AS last_author_retr_n,
+       coalesce(p.last_author_retr_misconduct_n, 0) AS last_author_retr_misconduct_n,
        coalesce(p.crossref_correction_count, 0) AS correction_count,
        p.crossref_correction_dois AS correction_dois,
        p.gds_misconduct_prob AS gds_prob,
@@ -427,12 +457,14 @@ def calculate_score(row: dict) -> float:
         row["eoc_flag"] * WEIGHTS["pubmed_eoc_flag"] +
         row["erratum_flag"] * WEIGHTS["pubmed_erratum_flag"] +
         row["ori_flag"] * WEIGHTS["ori_finding_flag"] +
-        row["coauthor_misconduct"] * WEIGHTS["coauthor_other_misconduct"] +
+        minmax_contribution("mid_any_count", row["mid_any_count"]) +
+        minmax_contribution("mid_misconduct_count", row["mid_misconduct_count"]) +
+        minmax_contribution("fl_any_count", row["fl_any_count"]) +
+        minmax_contribution("fl_misconduct_count", row["fl_misconduct_count"]) +
         minmax_contribution("institution_retr_rate_external", row["institution_retr_rate_external"]) +
         minmax_contribution("publisher_retr_rate", row["publisher_retr_rate"]) +
         minmax_contribution("country_retr_rate", row["country_retr_rate"]) +
         minmax_contribution("journal_retr_rate_external", row["journal_retr_rate_external"]) +
-        minmax_contribution("author_retr_rate_external", row["author_retr_rate_external"]) +
         row["correction_count"] * WEIGHTS["crossref_correction_flag_count"] +
         (WEIGHTS["paperconan_needs_human"] if adj == "needs_human" else 0.0) +
         (WEIGHTS["paperconan_confirmed"] if adj == "confirmed" else 0.0)
@@ -487,7 +519,10 @@ def main() -> None:
             "ori_finding": "Y" if row["ori_flag"] else "",
             "ori_doc_url": row["ori_doc_url"] or "",
             "ori_respondent": row["ori_respondent"] or "",
-            "coauthor_misconduct": row["coauthor_misconduct"],
+            "mid_any_count": row["mid_any_count"],
+            "mid_misconduct_count": row["mid_misconduct_count"],
+            "fl_any_count": row["fl_any_count"],
+            "fl_misconduct_count": row["fl_misconduct_count"],
             "institution_retr_rate": round(row["institution_retr_rate"], 3),
             "institution_retr_rate_name": row["institution_retr_rate_name"] or "",
             "institution_retr_rate_external": round(row["institution_retr_rate_external"], 5),
@@ -497,10 +532,12 @@ def main() -> None:
             "country_retr_rate": round(row["country_retr_rate"], 5),
             "country_retr_rate_name": row["country_retr_rate_name"] or "",
             "journal_retr_rate_external": round(row["journal_retr_rate_external"], 5),
-            "author_retr_rate_external": round(row["author_retr_rate_external"], 5),
-            "author_retr_rate_external_n": row["author_retr_rate_external_n"],
-            "author_retr_rate_external_name": row["author_retr_rate_external_name"] or "",
-            "author_retr_rate_external_position": row["author_retr_rate_external_position"] or "",
+            "first_author_name": row["first_author_name"] or "",
+            "first_author_retr_n": row["first_author_retr_n"],
+            "first_author_retr_misconduct_n": row["first_author_retr_misconduct_n"],
+            "last_author_name": row["last_author_name"] or "",
+            "last_author_retr_n": row["last_author_retr_n"],
+            "last_author_retr_misconduct_n": row["last_author_retr_misconduct_n"],
             "correction_count": row["correction_count"],
             "paperconan_adjudication": row["paperconan_adjudication"] or "",
             # secondary, labeled, NOT in score:
@@ -541,7 +578,10 @@ def main() -> None:
         "ori_doc_url",
         "ori_respondent",
         # graph features (in score)
-        "coauthor_misconduct",
+        "mid_any_count",
+        "mid_misconduct_count",
+        "fl_any_count",
+        "fl_misconduct_count",
         "institution_retr_rate",
         "institution_retr_rate_name",
         "institution_retr_rate_external",
@@ -551,10 +591,12 @@ def main() -> None:
         "country_retr_rate",
         "country_retr_rate_name",
         "journal_retr_rate_external",
-        "author_retr_rate_external",
-        "author_retr_rate_external_n",
-        "author_retr_rate_external_name",
-        "author_retr_rate_external_position",
+        "first_author_name",
+        "first_author_retr_n",
+        "first_author_retr_misconduct_n",
+        "last_author_name",
+        "last_author_retr_n",
+        "last_author_retr_misconduct_n",
         "correction_count",
         "paperconan_adjudication",
         # secondary learned prior (NOT in score)
@@ -606,9 +648,10 @@ def main() -> None:
         print(f"     ret{r['retracted_citation_count']} extret{r['external_retracted_citation_count']} "
               f"ref{r['reference_integrity_count']} "
               f"jrnl{r['journal_integrity_count']} ai{r['ai_text_tell_count']} "
-              f"coauthor-misconduct{r['coauthor_misconduct']} "
+              f"mid_any{r['mid_any_count']} mid_mc{r['mid_misconduct_count']} "
+              f"fl_any{r['fl_any_count']} fl_mc{r['fl_misconduct_count']} "
               f"irr_ext{r['institution_retr_rate_external']} prr{r['publisher_retr_rate']} crr{r['country_retr_rate']} "
-              f"jre{r['journal_retr_rate_external']} are_n{r['author_retr_rate_external_n']} "
+              f"jre{r['journal_retr_rate_external']} "
               f"corr{r['correction_count']}{gds}", file=sys.stderr)
         print(f"     {r['doi']} ({r['journal']})", file=sys.stderr)
 

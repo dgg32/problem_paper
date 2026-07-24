@@ -184,6 +184,17 @@ STAGES: list[Stage] = [
           "Journals API total-dois denominator, not scoped to our own graph. Complements "
           "(does not replace) the graph-internal journal_retr_rate. Rate-limited "
           "(one or two Crossref calls per distinct journal)."),
+    Stage("author_retraction_rate_external", "author_retraction_rate_external.py", "scoring",
+          [PYTHON, "graph_processing/author_retraction_rate_external.py"],
+          "EXTERNAL first/last author retraction history (ORCID-strict, full Retraction Watch db), "
+          "split any-reason vs misconduct-reason, tracked per position (fl_any_count/"
+          "fl_misconduct_count). Rate-limited (one ORCID call per distinct first/last-author ORCID)."),
+    Stage("coauthor_retraction_severity", "coauthor_retraction_severity.py", "scoring",
+          [PYTHON, "graph_processing/coauthor_retraction_severity.py"],
+          "Graph-internal MIDDLE co-author retraction history (fuzzy probable-person cluster), "
+          "split any-reason vs misconduct-reason (mid_any_count/mid_misconduct_count). Merged "
+          "2026-07-22 with the sensor above into one co-author-severity model, replacing the old "
+          "coauthor_other_misconduct + author_retr_rate_external scoring signals."),
     Stage("gds_node_classification", "gds_node_classification.py", "scoring",
           [PYTHON, "graph_processing/gds_node_classification.py"],
           "GDS FastRP embeddings + train/predict misconduct-class probability. A few seconds."),
