@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -43,7 +42,7 @@ sys.path.insert(0, str(REPO_ROOT / "graph_processing"))
 from normalize_authors import resolve_connection  # noqa: E402
 
 sys.path.insert(0, str(REPO_ROOT / "sensors"))
-from full_text_fetcher import fetch_full_text, canon_doi  # noqa: E402
+from full_text_fetcher import fetch_full_text  # noqa: E402
 
 REPORT_JSON = REPO_ROOT / "data" / "flags" / "ai_text_tell_flags.json"
 CACHE_DIR = REPO_ROOT / "data" / "full_text_cache"

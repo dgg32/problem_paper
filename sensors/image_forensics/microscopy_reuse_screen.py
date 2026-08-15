@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 from integrity_common import IMAGE_EXTS, add_common_args, emit_result, hamming, iter_files, make_finding, make_result
 

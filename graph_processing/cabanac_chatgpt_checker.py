@@ -104,7 +104,7 @@ def main() -> None:
 
     driver.close()
 
-    print(f"\n=== Cabanac ChatGPT-list checker — verification ===", file=sys.stderr)
+    print("\n=== Cabanac ChatGPT-list checker — verification ===", file=sys.stderr)
     print(f"Matched in this graph: {len(hits)} / {len(entries)} -- {[h['doi'] for h in hits]}", file=sys.stderr)
     print(f"Not-yet-retracted candidates with cabanac_chatgpt_flag: {dist['with_flag']} / {dist['n']}",
           file=sys.stderr)

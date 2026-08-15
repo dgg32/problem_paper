@@ -16,6 +16,14 @@ Flag records are kept as JSON so the review UI can surface evidence and source U
 Papers with no flags get explicit zero counts (empty JSON list) so scoring queries can
 use simple numeric properties.
 
+Each sensor's properties are RESET to 0/[] across every Paper before that sensor's
+current report is written back, so a paper that was flagged by an earlier run but is
+absent from the current report drops back to zero instead of keeping a stale count
+that still scores in tier_a_scoring.py. The reset is per-sensor and only happens for
+sensors whose report file is actually present: a missing data/flags/<sensor>.json
+leaves that sensor's existing properties untouched (an absent report means "not run
+here", e.g. on a machine restored from a graph snapshot, not "found nothing").
+
 pubpeer is handled separately, below the main SENSOR_CONFIG loop, and deliberately
 NOT as count_prop/json_prop: PubPeer comment counts measure community attention,
 not misconduct (sound papers attract comments; fraudulent ones can have none), so
@@ -110,8 +118,12 @@ def load_flags(path: Path) -> list[dict]:
 
 
 def main() -> None:
-    # Load and group flags by DOI for each sensor
+    # Load and group flags by DOI for each sensor. A sensor whose report file is
+    # absent is tracked separately from one whose report is present-but-empty --
+    # only the latter is evidence that the sensor ran and found nothing, and only
+    # the latter may reset existing properties (see module docstring).
     sensor_groups: dict[str, dict[str, list[dict]]] = {}
+    present_sensors: list[str] = []
     for sensor, cfg in SENSOR_CONFIG.items():
         flags = load_flags(cfg["file"])
         doi_key = cfg["doi_key"]
@@ -122,7 +134,11 @@ def main() -> None:
                 continue
             groups.setdefault(doi, []).append(flag)
         sensor_groups[sensor] = groups
-        print(f"  {sensor}: {len(flags)} flag records -> {len(groups)} distinct papers")
+        if cfg["file"].exists():
+            present_sensors.append(sensor)
+            print(f"  {sensor}: {len(flags)} flag records -> {len(groups)} distinct papers")
+        else:
+            print(f"  {sensor}: no report file at {cfg['file'].name} -- leaving existing properties as-is")
 
     # Collect all DOIs that appear in any sensor report
     all_dois = set()
@@ -130,8 +146,8 @@ def main() -> None:
         all_dois.update(groups.keys())
     print(f"\n  total distinct papers with any sensor flag: {len(all_dois)}")
 
-    if not all_dois:
-        print("  nothing to write; exiting.")
+    if not present_sensors:
+        print("  no sensor reports present; exiting.")
         return
 
     conn = resolve_connection()
@@ -139,10 +155,25 @@ def main() -> None:
 
     written = 0
     with driver.session(database=conn["database"]) as s:
+        # Clear each present sensor's properties first, so a paper dropped from
+        # this run's report doesn't keep a stale count that still scores.
+        for sensor in present_sensors:
+            cfg = SENSOR_CONFIG[sensor]
+            cleared = s.run(
+                f"MATCH (p:Paper) WHERE p.{cfg['count_prop']} IS NOT NULL AND p.{cfg['count_prop']} <> 0 "
+                f"SET p.{cfg['count_prop']} = 0, p.{cfg['json_prop']} = '[]' "
+                f"RETURN count(p) AS n"
+            ).single()["n"]
+            if cleared:
+                print(f"  {sensor}: reset {cleared} previously-flagged paper(s) before rewrite")
+
         for doi in sorted(all_dois):
             params: dict = {"doi": canon_doi(doi)}
             set_clauses = []
-            for sensor, cfg in SENSOR_CONFIG.items():
+            # present_sensors only -- writing a 0/[] here for a sensor with no
+            # report file would silently wipe properties this run has no data for.
+            for sensor in present_sensors:
+                cfg = SENSOR_CONFIG[sensor]
                 flags = sensor_groups[sensor].get(doi, [])
                 params[cfg["count_prop"]] = len(flags)
                 params[cfg["json_prop"]] = json.dumps(flags)

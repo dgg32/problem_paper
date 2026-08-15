@@ -1,4 +1,92 @@
-# BUG.md — improvement findings (code review, 2026-07-19)
+# BUG.md
+
+## Round 2 — bug hunt, 2026-08-15
+
+Findings #1-#11 below (the 2026-07-19 review) were all verified **already fixed** in the
+current tree before this round started: `normalize_authors.py` is now a re-export shim over
+`_conn.py`, `reference_integrity_checker.py` has `_first_or_str()` and scans all
+`is_retracted:false` papers, `tortured_phrases_detector.py`'s severity ternary is real
+(`high`/`medium`), `Counter` moved to module top, and `WEIGHTS`/`minmax_contribution()` are
+imported from `tier_a_scoring.py` in both consumers. They are kept below as history.
+
+### R2-1. Stale sensor flags survive a re-run — `graph_processing/wire_sensor_flags.py` (MEDIUM, correctness) — FIXED
+
+The script only ever wrote to DOIs present in the *current* `data/flags/*.json` reports, so a
+paper that was flagged by an earlier run and is **absent from the current report** kept its old
+`*_flag_count` forever. Those counts are scored in `tier_a_scoring.py` (e.g.
+`retracted_citation_flag_count` at weight 3.0), so a withdrawn flag kept inflating a paper's
+triage score indefinitely. The worst path: if every report came back empty, the old code hit
+`if not all_dois: print("nothing to write; exiting.")` and returned **before touching the
+graph at all**, leaving every prior flag in place. This also contradicted the module
+docstring's claim that "papers with no flags get explicit zero counts."
+
+**Root cause:** the write set was derived from the reports (`all_dois`) rather than from the
+graph, so "no longer flagged" and "not mentioned in this report" were indistinguishable.
+
+**Fix:** reset each sensor's `count_prop`/`json_prop` to `0`/`'[]'` across all `:Paper` nodes
+before rewriting that sensor's current report. Scoped to `present_sensors` (report file
+actually exists on disk) in both the reset and the per-DOI write, so a **missing** report file
+means "this sensor didn't run here" and leaves its properties untouched — important on a
+machine restored from `full_graph_snapshot.jsonl`, where `data/flags/` may be absent. An
+empty-but-present report now correctly zeroes the sensor instead of exiting early.
+Matches the reset-then-recompute idiom already used by `coauthor_retraction_severity.py`
+and `author_retraction_rate_external.py`.
+
+**Verified live (2026-08-15, 2078-paper graph):**
+1. The reset statement was run for all 7 sensors inside a rolled-back transaction — valid
+   Cypher, touch counts matching the graph's nonzero populations exactly.
+2. A real `wire_sensor_flags.py` run was diffed per-paper × per-property (2078 × 14) against
+   a pre-run backup: **byte-identical**, i.e. the added reset is exactly idempotent when the
+   reports on disk already match the graph.
+3. A synthetic stale flag (`10.1001/jama.2014.7247` forced to
+   `retracted_citation_flag_count = 99`, a DOI confirmed absent from
+   `retracted_citation_flags.json`, worth a spurious +297 at weight 3.0) survived the old
+   write-only-what's-in-the-report path and was **correctly cleared to `0`/`[]`** by the fix
+   (reset count rose 49 → 50 for that run). Graph restored to its exact pre-test state
+   afterwards.
+
+Note `data/flags/ai_text_tell_flags.json` is present-but-empty (`[]`) — exactly the case this
+fix reclassifies from "skip" to "reset". Its graph population is already 0, so the corrected
+semantics are a no-op today, but they now hold if that sensor ever retracts a flag.
+
+### R2-2. `ZeroDivisionError` on an empty comment set — `graph_processing/categorize_pubpeer_comments.py:163` (LOW, crash) — FIXED
+
+`uncategorized_pct = 100 * counts.get("uncategorized", 0) / len(categorized)` ran
+unconditionally. With zero PubPeer comments (`categorized == []`) it crashed *after* having
+already written `pubpeer_comment_categories.json` — so the output file was correct but the
+stage exited nonzero, which `review/pipeline_app.py` renders as a failed stage and, in a
+batch run, **stops the whole pipeline** (`_run_batch` returns on the first failure). The
+per-category loop above it was safe only incidentally (an empty `counts` never iterates).
+
+**Fix:** return early with an explicit "no PubPeer comments to categorize" message when
+`categorized` is empty. Verified by running `main()` against a synthetic zero-comment input.
+
+### R2-3. Dead imports / no-op f-strings across 15 files (TRIVIAL) — FIXED
+
+`ruff --select F401,F541 --fix`: removed unused `json` (`tier_a_scoring.py`), `yaml`
+(`build_review_page.py`), `re` and `canon_doi` (`ai_text_tell_detector.py`), `sys`/`time`
+(`full_text_fetcher.py`), assorted `typing`/`pathlib` imports in `sensors/image_forensics/`,
+and dropped the `f` prefix from 8 f-strings with no placeholders. No behavioural change;
+`compileall` and an import smoke-test of the five main modules pass.
+
+### Not fixed (deliberate)
+
+- **`review/pipeline_app.py` check-then-act races** — `run_stage`/`run_all` test
+  `STATE[...].status` and `BATCH_STATE["running"]` outside their locks, so two fast clicks can
+  start a stage twice. Left alone: the module docstring explicitly scopes this to "plain
+  threads — fine for a single local operator, not for concurrent multi-user use," and a real
+  fix belongs with the task queue that increment already defers.
+- **`author_retraction_rate_external.py` last-writer-wins on `first`/`last` positions** — if a
+  paper ever had two `WROTE` edges with `author_position='first'`, the Cypher `SET` would keep
+  whichever row Neo4j processed last. Not reachable today (OpenAlex emits exactly one `first`
+  and one `last` per work), so this is a latent hazard, not a live bug — flagged here rather
+  than fixed speculatively.
+- **`normalize_authors.py` shim** — 39 modules still import `resolve_connection` from it vs. 5
+  from `_conn`. Harmless indirection; a mass rewrite is churn without a correctness payoff.
+
+---
+
+# Round 1 — improvement findings (code review, 2026-07-19)
 
 Review scope: `graph_processing/` (24 scripts), `sensors/` (11 sensors + `image_forensics/`),
 `runs/run_paperconan.py`, `plan.md`, `AGENTS.md`. The project's scoring discipline (hard

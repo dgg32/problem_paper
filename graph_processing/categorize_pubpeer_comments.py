@@ -155,6 +155,14 @@ def main() -> None:
 
     print(f"  categorized {len(categorized)} comments across {len(with_comments)} papers")
     print(f"  report written -> {OUTPUT_JSON.relative_to(REPO_ROOT)}\n")
+
+    # No comments at all is a legitimate state (PubPeer returned nothing, or the
+    # sensor hasn't been re-run against a fresh candidate set) -- report it and
+    # stop, rather than dividing by a zero total below.
+    if not categorized:
+        print("  no PubPeer comments to categorize -- nothing to summarize.")
+        return
+
     print("  category breakdown:")
     for cat, n in sorted(counts.items(), key=lambda kv: -kv[1]):
         pct = 100 * n / len(categorized)

@@ -248,7 +248,7 @@ def main() -> None:
     print(f"\n  report written -> {REPORT_JSON.relative_to(REPO_ROOT)}")
 
     if by_journal:
-        print(f"\n  flagged journals:")
+        print("\n  flagged journals:")
         for jname, flags in sorted(by_journal.items(), key=lambda kv: -len(kv[1]))[:10]:
             high = len([f for f in flags if f["severity"] == "high"])
             print(f"    [{len(flags)} papers ({high} HIGH)] {jname}")

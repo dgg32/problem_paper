@@ -160,7 +160,6 @@ def main() -> None:
     updates = []
     for r in rows:
         entries = ccl_by_pmid.get(r["pmid"], [])
-        types = {t for t, _ in entries}
         # RetractionIn deliberately excluded here -- see module docstring
         # (shared-PMID conference-supplement ambiguity found during exploration).
         eoc_entries = [(t, s) for t, s in entries if t == "ExpressionOfConcernIn"]

@@ -185,7 +185,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import sys
 from pathlib import Path
 
@@ -630,7 +629,7 @@ def main() -> None:
 
     # Summary
     gds_flagged = sum(1 for r in results if r["gds_flagged"] == "Y")
-    print(f"\n=== Tier-A Scoring Summary ===", file=sys.stderr)
+    print("\n=== Tier-A Scoring Summary ===", file=sys.stderr)
     print(f"Candidates ranked   : {len(results)}", file=sys.stderr)
     print(f"Score range         : {results[-1]['score']:.1f} — {results[0]['score']:.1f}", file=sys.stderr)
     print(f"Average score       : {sum(r['score'] for r in results) / len(results):.1f}", file=sys.stderr)
@@ -641,7 +640,7 @@ def main() -> None:
         print(f"  {sensor}: {weight}", file=sys.stderr)
 
     # Top 5 by score
-    print(f"\nTop 5 by score:", file=sys.stderr)
+    print("\nTop 5 by score:", file=sys.stderr)
     for i, r in enumerate(results[:5], 1):
         gds = f" | GDS {r['gds_misconduct_prob']}{'⚑' if r['gds_flagged']=='Y' else ''}" if r['gds_misconduct_prob'] != "" else ""
         print(f"  {i}. [{r['score']:.1f}] {r['title'][:70]}...", file=sys.stderr)

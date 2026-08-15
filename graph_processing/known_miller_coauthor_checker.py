@@ -115,7 +115,7 @@ def main() -> None:
 
     driver.close()
 
-    print(f"\n=== Known-miller co-author checker — verification ===", file=sys.stderr)
+    print("\n=== Known-miller co-author checker — verification ===", file=sys.stderr)
     print(f"Total paper-authorship hits across all confirmed-ORCID millers: {total_hits}", file=sys.stderr)
     print(f"Not-yet-retracted candidates with known_miller_coauthor: {dist['with_flag']} / {dist['n']}",
           file=sys.stderr)

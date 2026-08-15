@@ -433,9 +433,9 @@ def main() -> None:
     write_meta(run_dir, args.doi, args.title, scan, image_screen=img_screen)
     counts, _ = count_severities(scan)
     print(f"\n  done — run archived at runs/{doi_dirname(args.doi)}/")
-    print(f"    inputs + audit : data/  (audit/REPORT.md · report.html · scan.json)")
+    print("    inputs + audit : data/  (audit/REPORT.md · report.html · scan.json)")
     print(f"    provenance     : meta.yaml (DRAFT — high={counts['high']} medium={counts['medium']} low={counts['low']})")
-    print(f"  NEXT: adjudicate the findings, then hand-write CONCLUSION.md (§0: signal, not verdict).")
+    print("  NEXT: adjudicate the findings, then hand-write CONCLUSION.md (§0: signal, not verdict).")
 
 
 if __name__ == "__main__":

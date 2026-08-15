@@ -160,7 +160,7 @@ def main() -> None:
     print(f"  relationships : {n_rels}")
     for rt, n in sorted(rel_types.items(), key=lambda x: -x[1]):
         print(f"    {rt:<20} {n}")
-    print(f"\n  restore with: python graph_processing/import_graph_snapshot.py")
+    print("\n  restore with: python graph_processing/import_graph_snapshot.py")
 
 
 if __name__ == "__main__":

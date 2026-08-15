@@ -218,7 +218,7 @@ def main() -> None:
     driver.close()
 
     matched = [r for r in results if r["flag"]]
-    print(f"\n=== Hijacked Journal Checker — verification ===", file=sys.stderr)
+    print("\n=== Hijacked Journal Checker — verification ===", file=sys.stderr)
     print(f"Matched {len(matched)} / {len(journals)} graph journals to a documented hijacking case:", file=sys.stderr)
     for r in matched:
         print(f"  {r['journal']}  (real site: {r['original_url'] or 'unknown'}; "

@@ -33,8 +33,6 @@ import argparse
 import html
 import json
 import re
-import sys
-import time
 import xml.etree.ElementTree as ET
 from io import BytesIO
 from pathlib import Path
@@ -223,7 +221,7 @@ def crossref_full_text(doi: str) -> dict | None:
             "text": text,
             "error": None,
         }
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         return None
 
 

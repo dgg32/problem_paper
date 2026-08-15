@@ -99,7 +99,7 @@ def report(s) -> None:
     print("=== adjudication re-expressed (instance + cluster grain) ===")
     print(f"  instances on a misconduct paper       : {n_inst}")
     print(f"  adjudicated probable-persons (clusters): {persons}  ({multi} multi-instance)")
-    print(f"  (was 201 'adjudicated authors' in the old merged model)")
+    print("  (was 201 'adjudicated authors' in the old merged model)")
     print(f"  adjudicated clusters resting ONLY on a coherence-outlier instance: "
           f"{len(shaky)}")
     if shaky:
