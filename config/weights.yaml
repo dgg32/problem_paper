@@ -62,6 +62,30 @@ mid_misconduct_minmax_target: 5.0   # middle co-author, MISCONDUCT-reason retrac
 fl_any_minmax_target: 5.0           # 1st/last author, ANY-reason retraction elsewhere (external, ORCID-strict; 2x mid_any)
 fl_misconduct_minmax_target: 10.0   # 1st/last author, MISCONDUCT-reason retraction elsewhere (4x mid_any, 2x fl_any)
 
+# VOLUME (added 2026-08-16, user request): the four PRESENCE targets above
+# deliberately answer only "does this author/cluster have ANY qualifying
+# retraction" -- 1 retraction and 17 score identically by design (that's the
+# 2026-07-22 fix for the 248-work-author domination problem noted above).
+# Verified live 2026-08-16 that this erases a real signal: a paper's last
+# author with 17 other retracted works (10.1016/j.envres.2024.119440,
+# subsequently retracted itself) scored no differently than 1 would have.
+# These four targets score the SAME underlying retraction COUNT a second
+# time, minmax-scaled against ITS OWN corpus-worst value (fl_any_volume/
+# fl_misconduct_volume/mid_any_volume/mid_misconduct_volume) -- additive to,
+# not a replacement for, the presence targets above. Minmax is what makes
+# this safe to reintroduce without reopening the domination bug: the corpus's
+# single worst author/cluster scores a fixed target no matter how far ahead
+# of everyone else they are (checked live: Pierre-Edouard Fournier,
+# fl_any_volume=134, qualifies on 17 of this corpus's candidate papers;
+# worst middle-cluster mid_any_volume=347). Deliberately HALF the matching
+# presence target (user-chosen scale) so presence ("tainted at all?") stays
+# the dominant signal and volume ("how much?") is a meaningful but secondary
+# amplifier, not a co-equal one.
+mid_any_volume_minmax_target: 1.25         # half of mid_any_minmax_target
+mid_misconduct_volume_minmax_target: 2.5   # half of mid_misconduct_minmax_target
+fl_any_volume_minmax_target: 2.5           # half of fl_any_minmax_target
+fl_misconduct_volume_minmax_target: 5.0    # half of fl_misconduct_minmax_target
+
 # journal_retr_rate (graph-internal) REMOVED 2026-07-22: it and
 # journal_integrity_flag_count's check 3 (>10% retraction-rate threshold,
 # see sensors/journal_integrity_check.py) measured the SAME underlying fact

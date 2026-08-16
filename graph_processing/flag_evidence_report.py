@@ -106,6 +106,10 @@ RETURN p.doi AS doi,
        coalesce(p.mid_misconduct_count, 0) AS mid_misconduct_count,
        coalesce(p.fl_any_count, 0) AS fl_any_count,
        coalesce(p.fl_misconduct_count, 0) AS fl_misconduct_count,
+       coalesce(p.mid_any_volume, 0) AS mid_any_volume,
+       coalesce(p.mid_misconduct_volume, 0) AS mid_misconduct_volume,
+       coalesce(p.fl_any_volume, 0) AS fl_any_volume,
+       coalesce(p.fl_misconduct_volume, 0) AS fl_misconduct_volume,
        coalesce(p.institution_retr_rate, 0.0) AS institution_retr_rate,
        p.institution_retr_rate_name AS institution_retr_rate_name,
        p.institution_retr_rate_n AS institution_retr_rate_n,
@@ -190,6 +194,10 @@ def calculate_score(row: dict) -> float:
         minmax_contribution("mid_misconduct_count", row["mid_misconduct_count"]) +
         minmax_contribution("fl_any_count", row["fl_any_count"]) +
         minmax_contribution("fl_misconduct_count", row["fl_misconduct_count"]) +
+        minmax_contribution("mid_any_volume", row["mid_any_volume"]) +
+        minmax_contribution("mid_misconduct_volume", row["mid_misconduct_volume"]) +
+        minmax_contribution("fl_any_volume", row["fl_any_volume"]) +
+        minmax_contribution("fl_misconduct_volume", row["fl_misconduct_volume"]) +
         minmax_contribution("institution_retr_rate_external", row["institution_retr_rate_external"]) +
         minmax_contribution("publisher_retr_rate", row["publisher_retr_rate"]) +
         minmax_contribution("country_retr_rate", row["country_retr_rate"]) +
@@ -325,6 +333,29 @@ def main() -> None:
                         for c in coauthors
                     ],
                 })
+                # VOLUME sibling (2026-08-16, user request): mid_misconduct_count
+                # above only answers "does at least one cluster qualify" (0/N
+                # clusters) -- a co-author with 1 other misconduct-coded
+                # retraction and one with 26 (this corpus's max) contribute
+                # identically there. This entry scores the SAME underlying
+                # count a second time, minmax-scaled against its own
+                # corpus-worst, as a SEPARATE additive entry (not folded into
+                # the entry above) so the JSON's per-signal contributions stay
+                # individually auditable -- see tier_a_scoring.py's
+                # DEFAULT_WEIGHTS "VOLUME" note for the full rationale.
+                mc_vol_max = get_corpus_max("mid_misconduct_volume")
+                flags_summary.append({
+                    "type": "mid_misconduct_volume",
+                    "count": row["mid_misconduct_volume"],
+                    "corpus_max": mc_vol_max,
+                    "target_max_score": WEIGHTS["mid_misconduct_volume_minmax_target"],
+                    "contribution": round(minmax_contribution("mid_misconduct_volume", row["mid_misconduct_volume"]), 2),
+                    "note": ("Total OTHER misconduct-coded retracted papers across the co-author(s) above "
+                             "(not just how many co-authors qualify -- one prolific co-author can carry most "
+                             "of this total). Additive to mid_misconduct_count, at half its target weight. "
+                             f"Minmax-scaled against the worst-in-corpus total ({mc_vol_max:g}), which scores "
+                             f"{WEIGHTS['mid_misconduct_volume_minmax_target']}."),
+                })
 
             if row["mid_any_count"] > 0:
                 coauthors = s.run(
@@ -346,6 +377,19 @@ def main() -> None:
                         {"coauthor_name": c["coauthor_name"], "paper_dois": c["example_dois"]}
                         for c in coauthors
                     ],
+                })
+                # VOLUME sibling -- see the mid_misconduct_volume note above.
+                any_vol_max = get_corpus_max("mid_any_volume")
+                flags_summary.append({
+                    "type": "mid_any_volume",
+                    "count": row["mid_any_volume"],
+                    "corpus_max": any_vol_max,
+                    "target_max_score": WEIGHTS["mid_any_volume_minmax_target"],
+                    "contribution": round(minmax_contribution("mid_any_volume", row["mid_any_volume"]), 2),
+                    "note": ("Total OTHER non-misconduct retracted papers across the co-author(s) above. "
+                             "Additive to mid_any_count, at half its target weight. Minmax-scaled against "
+                             f"the worst-in-corpus total ({any_vol_max:g}), which scores "
+                             f"{WEIGHTS['mid_any_volume_minmax_target']}."),
                 })
 
             if row["fl_misconduct_count"] > 0 or row["fl_any_count"] > 0:
@@ -373,6 +417,30 @@ def main() -> None:
                                  f"claimed work, not a finding about this paper. Minmax-scaled: the worst-in-"
                                  f"corpus count of qualifying first/last positions ({corpus_max:g}) scores "
                                  f"{WEIGHTS[target_key]}; this position contributes 1 unit toward that."),
+                    })
+                    # VOLUME sibling (2026-08-16): this position's OWN retracted-
+                    # works count (not the flat "1 unit" above) minmax-scaled
+                    # against its own corpus-worst -- see mid_misconduct_volume
+                    # note above for the full rationale. Already naturally
+                    # position-specific, so no per-position splitting needed:
+                    # the misconduct-only subset for misconduct positions,
+                    # the full (all-non-misconduct) count otherwise.
+                    volume_key = "fl_misconduct_volume" if is_misconduct else "fl_any_volume"
+                    volume_target_key = f"{volume_key}_minmax_target"
+                    volume_n = row[mc_key] if is_misconduct else row[n_key]
+                    volume_corpus_max = get_corpus_max(volume_key)
+                    flags_summary.append({
+                        "type": f"{volume_key}_{position}",
+                        "position": position,
+                        "count": volume_n,
+                        "corpus_max": volume_corpus_max,
+                        "target_max_score": WEIGHTS[volume_target_key],
+                        "contribution": round(minmax_contribution(volume_key, volume_n), 2),
+                        "note": (f"{row[name_key]} ({position} author): {volume_n} qualifying retracted work(s) "
+                                 "at this position, minmax-scaled directly (not flattened to 1 unit like the "
+                                 "entry above) -- additive, at half that entry's target weight. Minmax-scaled "
+                                 f"against the worst-in-corpus total for this bucket ({volume_corpus_max:g}), "
+                                 f"which scores {WEIGHTS[volume_target_key]}."),
                     })
 
             if row["institution_retr_rate"] > 0:

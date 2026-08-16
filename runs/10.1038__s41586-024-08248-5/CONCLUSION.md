@@ -101,6 +101,51 @@ different modality from the two numeric findings above, not the same
 concern, but corroborating that this paper is under substantive, specific
 scrutiny beyond the Editor's Note's vague wording.
 
+## Outcome — RETRACTED 2026-07-29 (recorded 2026-08-16)
+
+*Nature* retracted this paper on **2026-07-29**, nine days after the
+`needs_human` re-adjudication above. Verified via Crossref, not press
+coverage: retraction notice **10.1038/s41586-026-10942-5**, `update-to` type
+`retraction`, `source: publisher`, `updated: 2026-07-29T00:00:00Z`. The graph
+was corrected the same day this was recorded (`refresh_retraction_status.py`,
+OpenAlex-confirmed `is_retracted=true`), so the paper has left the triage pool.
+
+Institutional action preceded it: on 2026-05-06 Tongji University removed
+corresponding author Ping Wang (王平) as dean of the School of Life Science and
+Technology, demoted him two professional ranks with 24-month restrictions, and
+terminated first author Jiali Jin (金佳丽). The case became public after
+whistleblower Geng Hongwei ("耿同学") posted a video questioning the paper's
+data in April 2026.
+
+**How this run's findings relate to the stated retraction reason — read
+carefully, the overlap is partial:**
+
+- **Same class of evidence.** Reporting on the retraction note describes
+  concerns about the *authenticity of numerical source data*, with datasets
+  showing "unusual similarities within and between figure panels" — the same
+  category of anomaly this run detected (implausible exactness/duplication in
+  per-figure Source Data), not an image-forensics finding.
+- **Overlapping figure, different measurement.** The note is reported to centre
+  on γH2AX quantification in Extended Data Fig 10b,d,h,n. This run's open
+  findings were in Extended Data Fig 10 (tumour width/length identical column,
+  7/7) and ED Fig 7o (C+D=2.00000000 across 2 of 3 nominal replicates). Same
+  extended-data figure, **different panels and different measured quantities**.
+  So this run did not independently identify the specific panels the publisher
+  acted on.
+- **Sourcing caveat.** The panel letters and the γH2AX detail come from
+  secondary reporting; nature.com redirects to an auth wall and PubMed served a
+  cookie wall, so the note itself was not read verbatim. Only the notice DOI,
+  type, source and date above are directly verified (Crossref).
+
+**What this run can and cannot claim.** It was not a blind catch: as recorded
+below, the paper already carried a *Nature* Editor's Note and 21 PubPeer
+comments when it was scanned on 2026-07-20. The defensible claim is narrower:
+independent numeric forensics produced specific, quantified, figure-level
+anomalies in the same evidence class the publisher ultimately retracted over,
+on a paper the public record had flagged only in vague terms. The more useful
+lesson is in the adjudication history below — the first pass called this clean
+and was wrong.
+
 ## Adjudication history
 
 - 2026-07-20 (first pass): called all 64 high-severity findings benign,

@@ -285,6 +285,27 @@ DEFAULT_WEIGHTS = {
     "mid_misconduct_minmax_target": 5.0,
     "fl_any_minmax_target": 5.0,
     "fl_misconduct_minmax_target": 10.0,
+    # VOLUME (added 2026-08-16, user request): the four presence buckets above
+    # deliberately answer only "does this author/cluster have ANY qualifying
+    # retraction" (0/1/2) -- a co-author with 1 other retraction and one with
+    # 200+ contribute identically. Verified live 2026-08-16: an author in this
+    # corpus (10.1016/j.envres.2024.119440's last author) has 17 other
+    # retracted works and scored no differently than 1 would have. These four
+    # targets score that SAME underlying count a second time, minmax-scaled
+    # against its own corpus-worst value (see fl_any_volume/etc. in
+    # MINMAX_KEYS below) -- additive to, not a replacement for, the presence
+    # buckets above, at HALF their target (user-chosen scale: presence stays
+    # the dominant signal, volume is a meaningful but secondary amplifier).
+    # Minmax, not a flat per-work weight, is what makes this safe to add back:
+    # the worst-in-corpus author/cluster scores a fixed target no matter how
+    # far ahead of everyone else they are (checked live: Pierre-Edouard
+    # Fournier, fl_any_volume=134, appears on 17 of this corpus's candidate
+    # papers) -- the exact 40-80x-domination failure mode that the original
+    # 2026-07-22 count-based redesign existed to fix cannot recur here.
+    "mid_any_volume_minmax_target": 1.25,
+    "mid_misconduct_volume_minmax_target": 2.5,
+    "fl_any_volume_minmax_target": 2.5,
+    "fl_misconduct_volume_minmax_target": 5.0,
     # The four entity-level retraction-RATE signals below are all MINMAX-SCALED
     # against their own observed worst-in-corpus value (see minmax_contribution()
     # / MINMAX_KEYS below), not multiplied by a raw weight -- these "_minmax_target"
@@ -343,6 +364,13 @@ MINMAX_KEYS = {
     "mid_misconduct_count": "mid_misconduct_minmax_target",
     "fl_any_count": "fl_any_minmax_target",
     "fl_misconduct_count": "fl_misconduct_minmax_target",
+    # VOLUME siblings of the four count-based keys above -- same underlying
+    # Paper properties' magnitude instead of their presence. See DEFAULT_WEIGHTS
+    # "VOLUME" note.
+    "mid_any_volume": "mid_any_volume_minmax_target",
+    "mid_misconduct_volume": "mid_misconduct_volume_minmax_target",
+    "fl_any_volume": "fl_any_volume_minmax_target",
+    "fl_misconduct_volume": "fl_misconduct_volume_minmax_target",
 }
 
 # Populated once per run by compute_corpus_maxes(), BEFORE any row is scored --
@@ -410,6 +438,10 @@ RETURN p.doi AS doi,
        coalesce(p.mid_misconduct_count, 0) AS mid_misconduct_count,
        coalesce(p.fl_any_count, 0) AS fl_any_count,
        coalesce(p.fl_misconduct_count, 0) AS fl_misconduct_count,
+       coalesce(p.mid_any_volume, 0) AS mid_any_volume,
+       coalesce(p.mid_misconduct_volume, 0) AS mid_misconduct_volume,
+       coalesce(p.fl_any_volume, 0) AS fl_any_volume,
+       coalesce(p.fl_misconduct_volume, 0) AS fl_misconduct_volume,
        coalesce(p.institution_retr_rate, 0.0) AS institution_retr_rate,
        p.institution_retr_rate_name AS institution_retr_rate_name,
        p.institution_retr_rate_n AS institution_retr_rate_n,
@@ -460,6 +492,10 @@ def calculate_score(row: dict) -> float:
         minmax_contribution("mid_misconduct_count", row["mid_misconduct_count"]) +
         minmax_contribution("fl_any_count", row["fl_any_count"]) +
         minmax_contribution("fl_misconduct_count", row["fl_misconduct_count"]) +
+        minmax_contribution("mid_any_volume", row["mid_any_volume"]) +
+        minmax_contribution("mid_misconduct_volume", row["mid_misconduct_volume"]) +
+        minmax_contribution("fl_any_volume", row["fl_any_volume"]) +
+        minmax_contribution("fl_misconduct_volume", row["fl_misconduct_volume"]) +
         minmax_contribution("institution_retr_rate_external", row["institution_retr_rate_external"]) +
         minmax_contribution("publisher_retr_rate", row["publisher_retr_rate"]) +
         minmax_contribution("country_retr_rate", row["country_retr_rate"]) +
@@ -522,6 +558,10 @@ def main() -> None:
             "mid_misconduct_count": row["mid_misconduct_count"],
             "fl_any_count": row["fl_any_count"],
             "fl_misconduct_count": row["fl_misconduct_count"],
+            "mid_any_volume": row["mid_any_volume"],
+            "mid_misconduct_volume": row["mid_misconduct_volume"],
+            "fl_any_volume": row["fl_any_volume"],
+            "fl_misconduct_volume": row["fl_misconduct_volume"],
             "institution_retr_rate": round(row["institution_retr_rate"], 3),
             "institution_retr_rate_name": row["institution_retr_rate_name"] or "",
             "institution_retr_rate_external": round(row["institution_retr_rate_external"], 5),
@@ -581,6 +621,10 @@ def main() -> None:
         "mid_misconduct_count",
         "fl_any_count",
         "fl_misconduct_count",
+        "mid_any_volume",
+        "mid_misconduct_volume",
+        "fl_any_volume",
+        "fl_misconduct_volume",
         "institution_retr_rate",
         "institution_retr_rate_name",
         "institution_retr_rate_external",

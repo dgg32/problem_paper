@@ -15,6 +15,15 @@ findings:
   medium: 18
   low: 400
 top_finding: "identical_column · ExtDataFig10 width(mm) == length(mm) for one dietary group (n=7 of 7; ~1.2e-6 by chance vs. neighboring group's 1/7 baseline)"
+# OUTCOME (recorded 2026-08-16, does NOT change the adjudication below):
+# Nature RETRACTED this paper 2026-07-29 -- notice 10.1038/s41586-026-10942-5,
+# Crossref update-to type=retraction, source=publisher. Graph corrected via
+# refresh_retraction_status.py the same day; paper has left the triage pool.
+# See CONCLUSION.md "Outcome" for how these findings do and do not overlap
+# with the publisher's stated reason (same evidence class, ExtData Fig 10, but
+# different panels/measurements -- this run did not identify the exact panels).
+retraction_date: "2026-07-29"
+retraction_notice_doi: "10.1038/s41586-026-10942-5"
 adjudicated: needs_human        # two findings (identical_column on ExtDataFig10;
                                  # sum_constant+exact_linear on ExtDataFig7 "ED Fig.7o",
                                  # where 2 of 3 nominal replicates are exact algebraic

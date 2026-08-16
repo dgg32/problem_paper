@@ -86,6 +86,32 @@ shipping that this avoids the single-author-domination failure mode a flat
 corpus has 248 ORCID-claimed works flagged retracted; scoring that literally
 would have made one signal 40-80x bigger than everything else combined).
 
+VOLUME, added as a SEPARATE minmax-scaled layer (2026-08-16, user request):
+fl_any_count/fl_misconduct_count above deliberately answer only "is this
+position's history tainted at all" (0/1 per position) -- by design, a first/
+last author with 1 qualifying retraction and one with 17 contribute
+identically. That flattening was the 2026-07-22 fix for the domination
+failure mode above, but it also erases a real severity signal: verified live
+2026-08-16 (10.1016/j.envres.2024.119440, retracted, last author Arivalagan
+Pugazhendhi has 17 other retracted works -- scored no differently than 1
+would have). fl_any_volume/fl_misconduct_volume below restore that severity
+signal WITHOUT reopening the domination risk, because they use the exact same
+minmax-against-corpus-worst mechanism already proven safe for the entity-rate
+signals (institution/publisher/country/journal): the single worst-in-corpus
+author (checked live: Pierre-Edouard Fournier, n=134 any-reason, appearing as
+a qualifying first/last author on 17 of this corpus's candidate papers) scores
+a fixed target no matter how far ahead of everyone else he is -- adding a
+future, even-worse outlier cannot make this signal blow up the way a flat
+per-work weight would. This is ADDITIVE to, not a replacement for,
+fl_any_count/fl_misconduct_count -- the presence question ("tainted at all?")
+and the severity question ("how much?") are both real signals, so both are
+scored, at half-weight for volume (config/weights.yaml) so presence stays
+dominant. SUM across positions when both qualify (55 papers in this corpus do,
+e.g. first=20 + last=134=154) -- matches the existing convention that
+fl_any_count already sums 0/1/2 across positions rather than keeping only the
+worse one; checked live this doesn't distort the corpus max (154 vs a
+single-author max of 134).
+
 Idempotent: recomputes AuthorInstance and Paper properties from scratch
 every run. One ORCID API call per DISTINCT first/last-author ORCID in the
 graph, not per paper.
@@ -246,7 +272,8 @@ def main() -> None:
                 p.last_author_name = null, p.last_author_retr_rate = null,
                 p.last_author_retr_n = null, p.last_author_retr_misconduct_n = null,
                 p.last_author_retr_total = null, p.last_author_low_confidence = null,
-                p.fl_any_count = 0, p.fl_misconduct_count = 0
+                p.fl_any_count = 0, p.fl_misconduct_count = 0,
+                p.fl_any_volume = 0, p.fl_misconduct_volume = 0
             """
         ).consume()
         s.run(
@@ -287,13 +314,32 @@ def main() -> None:
                           THEN 1 ELSE 0 END)
             """
         ).consume()
+        # fl_any_volume/fl_misconduct_volume: SUM (not max) of the underlying
+        # retraction count across qualifying positions -- see module docstring
+        # "VOLUME" note for why this is additive to, not a replacement for,
+        # fl_any_count/fl_misconduct_count above, and why sum over max.
+        s.run(
+            """
+            MATCH (p:Paper)
+            SET p.fl_misconduct_volume =
+                    (CASE WHEN coalesce(p.first_author_retr_misconduct_n, 0) > 0 THEN p.first_author_retr_misconduct_n ELSE 0 END) +
+                    (CASE WHEN coalesce(p.last_author_retr_misconduct_n, 0) > 0 THEN p.last_author_retr_misconduct_n ELSE 0 END),
+                p.fl_any_volume =
+                    (CASE WHEN coalesce(p.first_author_retr_n, 0) > 0 AND coalesce(p.first_author_retr_misconduct_n, 0) = 0
+                          THEN p.first_author_retr_n ELSE 0 END) +
+                    (CASE WHEN coalesce(p.last_author_retr_n, 0) > 0 AND coalesce(p.last_author_retr_misconduct_n, 0) = 0
+                          THEN p.last_author_retr_n ELSE 0 END)
+            """
+        ).consume()
 
         dist = s.run(
             """
             MATCH (p:Paper {is_retracted:false})
             RETURN count(*) AS n,
                    sum(CASE WHEN p.fl_any_count > 0 THEN 1 ELSE 0 END) AS with_any,
-                   sum(CASE WHEN p.fl_misconduct_count > 0 THEN 1 ELSE 0 END) AS with_misconduct
+                   sum(CASE WHEN p.fl_misconduct_count > 0 THEN 1 ELSE 0 END) AS with_misconduct,
+                   max(p.fl_any_volume) AS max_any_volume,
+                   max(p.fl_misconduct_volume) AS max_misconduct_volume
             """
         ).single()
 
@@ -303,6 +349,9 @@ def main() -> None:
     print(f"Not-yet-retracted candidates with a qualifying first/last author: "
           f"{dist['with_any']} any-reason, {dist['with_misconduct']} misconduct-reason (of {dist['n']})",
           file=sys.stderr)
+    print(f"Max fl_any_volume in corpus: {dist['max_any_volume']}  |  "
+          f"max fl_misconduct_volume: {dist['max_misconduct_volume']}  "
+          f"(minmax-scored, see tier_a_scoring.py)", file=sys.stderr)
 
     matched = [r for r in results if r["rate"] is not None]
     matched.sort(key=lambda r: r["rate"], reverse=True)

@@ -54,9 +54,13 @@ TAG_LABELS = [
     ("eoc", "Expression of Concern"),
     ("ori", "ORI Finding"),
     ("fl-misconduct", "1st/last author: misconduct retraction"),
+    ("fl-misconduct-volume", "1st/last author: misconduct retraction (volume)"),
     ("fl-any-retr", "1st/last author: other retraction"),
+    ("fl-any-retr-volume", "1st/last author: other retraction (volume)"),
     ("mid-misconduct", "Co-author: misconduct retraction"),
+    ("mid-misconduct-volume", "Co-author: misconduct retraction (volume)"),
     ("mid-any-retr", "Co-author: other retraction"),
+    ("mid-any-retr-volume", "Co-author: other retraction (volume)"),
     ("cites-retracted", "Cites retracted"),
     ("cites-retracted-ext", "Cites retracted (ext.)"),
     ("self-cite", "Cites own retracted"),
@@ -153,6 +157,10 @@ RETURN p.doi AS doi, p.title AS title, j.name AS journal,
        coalesce(p.mid_misconduct_count, 0) AS mid_misconduct_count,
        coalesce(p.fl_any_count, 0) AS fl_any_count,
        coalesce(p.fl_misconduct_count, 0) AS fl_misconduct_count,
+       coalesce(p.mid_any_volume, 0) AS mid_any_volume,
+       coalesce(p.mid_misconduct_volume, 0) AS mid_misconduct_volume,
+       coalesce(p.fl_any_volume, 0) AS fl_any_volume,
+       coalesce(p.fl_misconduct_volume, 0) AS fl_misconduct_volume,
        coalesce(p.institution_retr_rate, 0.0) AS institution_retr_rate,
        p.institution_retr_rate_name AS institution_retr_rate_name,
        p.institution_retr_rate_n AS institution_retr_rate_n,
@@ -240,7 +248,16 @@ LIMIT 6
 # buckets (mid_any/mid_misconduct/fl_any/fl_misconduct, merged 2026-07-22
 # from coauthor_other_misconduct + author_retr_rate_external -- user request)
 # are all MINMAX-SCALED against their own worst-in-corpus value; see
-# MINMAX_KEYS in tier_a_scoring.py.
+# MINMAX_KEYS in tier_a_scoring.py. The four *_volume siblings (added
+# 2026-08-16, user request) score the SAME underlying retraction count a
+# second time, minmax-scaled against ITS OWN corpus-worst -- see
+# tier_a_scoring.py's DEFAULT_WEIGHTS "VOLUME" note for why this is additive
+# rather than a replacement (an author with 1 retraction and one with 17
+# score identically in fl_any_count by design; fl_any_volume is what tells
+# them apart, at half fl_any_count's weight). Given their own chips/rows
+# (2026-08-16, user request, revising the initial fold-together design) so a
+# reader can see and independently toggle exactly how much of a paper's
+# score came from "tainted at all" vs "how much" -- see chip_contributions().
 def minmax_total(r: dict) -> float:
     return (
         minmax_contribution("institution_retr_rate_external", r["institution_retr_rate_external"])
@@ -251,6 +268,10 @@ def minmax_total(r: dict) -> float:
         + minmax_contribution("mid_misconduct_count", r["mid_misconduct_count"])
         + minmax_contribution("fl_any_count", r["fl_any_count"])
         + minmax_contribution("fl_misconduct_count", r["fl_misconduct_count"])
+        + minmax_contribution("mid_any_volume", r["mid_any_volume"])
+        + minmax_contribution("mid_misconduct_volume", r["mid_misconduct_volume"])
+        + minmax_contribution("fl_any_volume", r["fl_any_volume"])
+        + minmax_contribution("fl_misconduct_volume", r["fl_misconduct_volume"])
     )
 
 
@@ -281,7 +302,8 @@ def score(r: dict) -> float:
 # other TAG_LABELS entry keeps the old filter behaviour unchanged, since
 # there's nothing for them to zero out.
 SCORED_TAGS = {
-    "eoc", "ori", "fl-misconduct", "fl-any-retr", "mid-misconduct", "mid-any-retr",
+    "eoc", "ori", "fl-misconduct", "fl-misconduct-volume", "fl-any-retr", "fl-any-retr-volume",
+    "mid-misconduct", "mid-misconduct-volume", "mid-any-retr", "mid-any-retr-volume",
     "cites-retracted", "cites-retracted-ext",
     "correction", "journal", "journal-high-retr", "publisher-high-retr",
     "institution-high-retr", "country-high-retr",
@@ -291,26 +313,41 @@ SCORED_TAGS = {
 
 def chip_contributions(r: dict) -> dict[str, float]:
     """Per-signal score contribution for each SCORED_TAGS chip -- all 5
-    entity-rate minmax signals plus the 4 co-author-severity buckets
+    entity-rate minmax signals plus the 8 co-author-severity buckets
     (fl-misconduct/fl-any-retr/mid-misconduct/mid-any-retr, merged
     2026-07-22 from coauthor_other_misconduct + author_retr_rate_external --
-    user request) have their own chip. Embedded as JSON on each card
-    (data-contribs) so the browser can subtract any subset live without a
-    page reload -- mirrors minmax_total()'s terms exactly, just broken out
-    signal-by-signal. Each value here is the PAPER-LEVEL total for that tag
-    (matching minmax_total()'s terms exactly, so the chip toggle zeroes the
-    right amount); render_evidence()'s individual first/last-author rows
-    show a smaller PER-POSITION share of this same total (see its own note)
-    so two qualifying positions on one paper don't each claim the whole
-    paper-level contribution."""
+    user request; each split 2026-08-16, user request, into a presence chip
+    and its own separate *-volume chip) have their own chip. Embedded as
+    JSON on each card (data-contribs) so the browser can subtract any subset
+    live without a page reload -- mirrors minmax_total()'s terms exactly,
+    just broken out signal-by-signal. Each value here is the PAPER-LEVEL
+    total for that tag (matching minmax_total()'s terms exactly, so the chip
+    toggle zeroes the right amount); render_evidence()'s individual
+    first/last-author rows show a smaller PER-POSITION share of the presence
+    total (see its own note) so two qualifying positions on one paper don't
+    each claim the whole paper-level contribution -- the volume rows are
+    already naturally position-specific and need no such splitting.
+
+    Presence and volume were originally folded into one combined chip; split
+    apart on user request so a reader can see, and independently toggle,
+    exactly how much of a paper's score came from "tainted at all" (fixed
+    per-position unit, deliberately blind to HOW tainted) vs "how much"
+    (minmax-scaled against the corpus-worst actual count) -- see
+    tier_a_scoring.py's DEFAULT_WEIGHTS "VOLUME" note for the full
+    rationale, and plan.md's 2026-08-16 entries for the worked example that
+    motivated it (10.1016/j.envres.2024.119440)."""
     adj = r.get("paperconan_adjudication")
     return {
         "eoc": r["eoc_flag"] * WEIGHTS["pubmed_eoc_flag"],
         "ori": r["ori_flag"] * WEIGHTS["ori_finding_flag"],
         "mid-misconduct": minmax_contribution("mid_misconduct_count", r["mid_misconduct_count"]),
+        "mid-misconduct-volume": minmax_contribution("mid_misconduct_volume", r["mid_misconduct_volume"]),
         "mid-any-retr": minmax_contribution("mid_any_count", r["mid_any_count"]),
+        "mid-any-retr-volume": minmax_contribution("mid_any_volume", r["mid_any_volume"]),
         "fl-misconduct": minmax_contribution("fl_misconduct_count", r["fl_misconduct_count"]),
+        "fl-misconduct-volume": minmax_contribution("fl_misconduct_volume", r["fl_misconduct_volume"]),
         "fl-any-retr": minmax_contribution("fl_any_count", r["fl_any_count"]),
+        "fl-any-retr-volume": minmax_contribution("fl_any_volume", r["fl_any_volume"]),
         "cites-retracted": r["ret_count"] * WEIGHTS["retracted_citation_flag_count"],
         "cites-retracted-ext": r["ext_ret_count"] * WEIGHTS["external_retracted_citation_flag_count"],
         "correction": r["correction_count"] * WEIGHTS["crossref_correction_flag_count"],
@@ -335,6 +372,15 @@ _TAG_RE = re.compile(r"<[^>]+>")
 
 def esc(x) -> str:
     return html.escape(str(x if x is not None else ""))
+
+
+def _count_volume_suffix(count: int, volume: int, unit: str) -> str:
+    """Badge text shows the raw retraction-VOLUME behind a count whenever it
+    exceeds the count (2026-08-16) -- otherwise a co-author with 1 other
+    retracted paper and one with 17 look identical even at a glance, exactly
+    the flattening tier_a_scoring.py's fl_any_volume/mid_any_volume now score
+    but the collapsed card would still visually hide."""
+    return f'{count}' if volume <= count else f'{count}, {volume} {unit} total'
 
 
 def esc_title(x) -> str:
@@ -578,17 +624,19 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
 
     def minmax_note(key: str) -> str:
         """Help-popover text explaining the minmax scaling for one of the
-        entity-level retraction-RATE rows or co-author-severity COUNT rows --
-        see plan.md's 2026-07-22 minmax-scoring update (minmax_contribution()
-        in tier_a_scoring.py): the worst offender in this category anchors
-        the top of the scale (its target score), everyone else scores
-        proportionally less. Count-based keys (fl_*/mid_* co-author buckets,
-        added 2026-07-22) show the worst-in-corpus value as a plain integer;
+        entity-level retraction-RATE rows or co-author-severity COUNT/VOLUME
+        rows -- see plan.md's 2026-07-22 minmax-scoring update
+        (minmax_contribution() in tier_a_scoring.py): the worst offender in
+        this category anchors the top of the scale (its target score),
+        everyone else scores proportionally less. Count- and volume-based
+        keys (fl_*/mid_* co-author buckets, _count added 2026-07-22, _volume
+        added 2026-08-16) show the worst-in-corpus value as a plain integer;
         rate-based keys (institution/publisher/country/journal) show it as
         a percentage -- a bare "2" would be misleading formatted as "200%"."""
         target = WEIGHTS[MINMAX_KEYS[key]]
         corpus_max = get_corpus_max(key)
-        corpus_max_str = f'{corpus_max:g}' if key.endswith("_count") else f'{corpus_max:.3%}'
+        corpus_max_str = (f'{corpus_max:g}' if key.endswith("_count") or key.endswith("_volume")
+                           else f'{corpus_max:.3%}')
         return (f'Minmax-scaled: the worst-in-corpus value for this signal ({corpus_max_str}) scores '
                 f'{target:g}; this row scores proportionally less.')
 
@@ -696,6 +744,22 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
         is_misconduct = r[mc_key] > 0
         key = "fl_misconduct_count" if is_misconduct else "fl_any_count"
         tag = "fl-misconduct" if is_misconduct else "fl-any-retr"
+        # Volume (2026-08-16, split into its own row on user request for
+        # transparency): this position's OWN retracted-works count, minmax-
+        # scaled against its own corpus-worst -- unlike the presence share
+        # below (a fixed per-position unit via minmax_contribution(key, 1)),
+        # volume is naturally position-specific already, so no splitting
+        # trick is needed: just feed this position's own count straight in.
+        # misconduct positions use their misconduct-only subset (r[mc_key]),
+        # matching how fl_misconduct_volume itself is computed (see
+        # author_retraction_rate_external.py).
+        volume_key = "fl_misconduct_volume" if is_misconduct else "fl_any_volume"
+        volume_tag = "fl-misconduct-volume" if is_misconduct else "fl-any-retr-volume"
+        volume_n = r[mc_key] if is_misconduct else r[n_key]
+        misconduct_clause = (
+            ', a MISCONDUCT-coded reason among them' if is_misconduct else
+            ' (none of this person\'s retractions are misconduct-coded -- half the weight of a misconduct one)'
+        )
         author_help = (
             'Retracted per Retraction Watch, matched by DOI against this specific person\'s own ORCID '
             'record -- no name-matching involved. Restricted to first/last authors only (the ones '
@@ -703,10 +767,9 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
             'work, not a finding about this paper specifically. '
             'Different from the co-author row(s) below: this is restricted to the first/last '
             'author specifically, matched by strict ORCID (not a fuzzy cluster), and counts against the '
-            'full external Retraction Watch database'
-            + (', a MISCONDUCT-coded reason among them' if is_misconduct else
-               ' (none of this person\'s retractions are misconduct-coded -- half the weight of a misconduct one)')
-            + '. '
+            'full external Retraction Watch database' + misconduct_clause + '. '
+            'This row is the PRESENCE half: a flat per-position share for having ANY qualifying retraction '
+            'at all, deliberately blind to how many -- see the row below for the volume half. '
             + minmax_note(key)
         )
         parts.append(row(
@@ -717,6 +780,25 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
             f'({r[rate_key]:.1%}), {r[mc_key]} of them misconduct-coded.',
             help=author_help,
             tag=tag,
+        ))
+        volume_help = (
+            'The VOLUME half of the row above, split out (2026-08-16, user request) so it can be seen and '
+            'toggled independently: the presence row above scores "does this person have ANY qualifying '
+            'retraction" the same whether the true count is 1 or 100; this row scores the actual count' + (
+                f' ({volume_n} misconduct-coded work(s))' if is_misconduct else f' ({volume_n} work(s))'
+            ) + ', minmax-scaled against the worst-in-corpus value for this same bucket, so a genuinely '
+            'extreme case (checked live: this corpus\'s worst offender) scores the full volume target and '
+            'everyone else scores proportionally less -- same anti-domination mechanism as the entity-rate '
+            'rows elsewhere on this card. ' + minmax_note(volume_key)
+        )
+        parts.append(row(
+            f'👤 {position.capitalize()} author retraction rate — volume'
+            + (' (misconduct-coded)' if is_misconduct else ' (non-misconduct)'),
+            minmax_contribution(volume_key, volume_n),
+            f'{volume_n} of {esc(r[name_key])}\'s ORCID-claimed works retracted'
+            + (' for a misconduct-coded reason' if is_misconduct else '') + '.',
+            help=volume_help,
+            tag=volume_tag,
         ))
 
     if r["mid_misconduct_count"] > 0:
@@ -729,8 +811,24 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
                  'this paper or this person. Matched via a fuzzier probable-person cluster (not strict ORCID), '
                  'and only counts misconduct-REASON retractions found elsewhere IN THIS GRAPH — not an external, '
                  'all-cause, ORCID-verified rate. Different from the 1st/last author rows above: those use '
-                 'strict ORCID matching against the full external Retraction Watch database.',
+                 'strict ORCID matching against the full external Retraction Watch database. This row is the '
+                 'PRESENCE half: a flat share for having ANY qualifying co-author at all, deliberately blind to '
+                 'how many retracted papers are behind them -- see the row below for the volume half. '
+                 + minmax_note("mid_misconduct_count"),
             tag="mid-misconduct",
+        ))
+        parts.append(row(
+            'Co-authors in misconduct work — volume',
+            minmax_contribution("mid_misconduct_volume", r["mid_misconduct_volume"]),
+            f'{r["mid_misconduct_volume"]} other misconduct-coded retracted paper(s) total across the '
+            f'{r["mid_misconduct_count"]} co-author(s) above (one prolific co-author can carry most of this '
+            'total -- it need not split evenly).',
+            help='The VOLUME half of the row above, split out (2026-08-16, user request) so it can be seen '
+                 'and toggled independently: the presence row scores "does at least one co-author qualify" the '
+                 'same whether the total behind them is 1 retracted paper or 100; this row scores the actual '
+                 'total, minmax-scaled against the worst-in-corpus cluster total for this same bucket. '
+                 + minmax_note("mid_misconduct_volume"),
+            tag="mid-misconduct-volume",
         ))
 
     if r["mid_any_count"] > 0:
@@ -740,8 +838,18 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
             f'<ul>{_coauthor_names(mid_coauthors_any)}</ul>',
             help='Same as the misconduct row above, but for a MIDDLE co-author whose other retracted '
                  'work was NOT retracted for a misconduct-signal reason (honest error, duplication, etc.) -- '
-                 'scored at half the weight.',
+                 'scored at half the weight. This row is the PRESENCE half; see the row below for the volume '
+                 'half. ' + minmax_note("mid_any_count"),
             tag="mid-any-retr",
+        ))
+        parts.append(row(
+            'Co-authors in other retracted work — volume',
+            minmax_contribution("mid_any_volume", r["mid_any_volume"]),
+            f'{r["mid_any_volume"]} other non-misconduct retracted paper(s) total across the '
+            f'{r["mid_any_count"]} co-author(s) above.',
+            help='The VOLUME half of the row above, same idiom as the misconduct-volume row -- minmax-scaled '
+                 'against the worst-in-corpus cluster total for this bucket. ' + minmax_note("mid_any_volume"),
+            tag="mid-any-retr-volume",
         ))
 
     # --- non-scored review context ---
@@ -920,14 +1028,28 @@ def main() -> None:
                 badges.append('<span class="badge badge-ori">ORI Finding</span>'); tags.append("ori")
             if r["eoc_flag"]:
                 badges.append('<span class="badge badge-eoc">Expression of Concern</span>'); tags.append("eoc")
+            # Each badge is tagged with BOTH its presence tag and its volume
+            # tag (2026-08-16) -- the badge text itself stays one combined
+            # line (still the clearest at-a-glance summary), but both scoring
+            # chips need this card counted in tag_counts, and both need this
+            # card's data-contribs entry populated, or the toolbar's chip-n
+            # count and the chip's live re-rank would silently under-report.
             if r["mid_misconduct_count"] > 0:
-                badges.append(f'<span class="badge badge-flag">Co-author of misconduct work ({r["mid_misconduct_count"]})</span>'); tags.append("mid-misconduct")
+                badges.append(f'<span class="badge badge-flag">Co-author of misconduct work '
+                              f'({_count_volume_suffix(r["mid_misconduct_count"], r["mid_misconduct_volume"], "retracted papers")})</span>')
+                tags += ["mid-misconduct", "mid-misconduct-volume"]
             if r["mid_any_count"] > 0:
-                badges.append(f'<span class="badge badge-flag">Co-author of other retracted work ({r["mid_any_count"]})</span>'); tags.append("mid-any-retr")
+                badges.append(f'<span class="badge badge-flag">Co-author of other retracted work '
+                              f'({_count_volume_suffix(r["mid_any_count"], r["mid_any_volume"], "retracted papers")})</span>')
+                tags += ["mid-any-retr", "mid-any-retr-volume"]
             if r["fl_misconduct_count"] > 0:
-                badges.append(f'<span class="badge badge-flag">👤 1st/last author, misconduct retraction ({r["fl_misconduct_count"]})</span>'); tags.append("fl-misconduct")
+                badges.append(f'<span class="badge badge-flag">👤 1st/last author, misconduct retraction '
+                              f'({_count_volume_suffix(r["fl_misconduct_count"], r["fl_misconduct_volume"], "retracted works")})</span>')
+                tags += ["fl-misconduct", "fl-misconduct-volume"]
             if r["fl_any_count"] > 0:
-                badges.append(f'<span class="badge badge-flag">👤 1st/last author, other retraction ({r["fl_any_count"]})</span>'); tags.append("fl-any-retr")
+                badges.append(f'<span class="badge badge-flag">👤 1st/last author, other retraction '
+                              f'({_count_volume_suffix(r["fl_any_count"], r["fl_any_volume"], "retracted works")})</span>')
+                tags += ["fl-any-retr", "fl-any-retr-volume"]
             if r["ret_count"] > 0:
                 ret_flags = json.loads(r["ret_flags"] or "[]")
                 n_self = sum(1 for f in ret_flags if f.get("self_citation"))
