@@ -16,6 +16,15 @@ Scoring logic:
     false-positive rate, 2026-07-20)
   - journal_integrity_flag_count: weight 1.0 (publishing in compromised journals)
   - ai_text_tell_flag_count: weight 2.0 (obvious AI generation is suspicious)
+  - tortured_phrase_flag_count: weight 2.5 (added 2026-08-17 -- exact multi-word
+    match against Cabanac's PPS "Favourite Tortured Phrases" list; near-zero
+    false positive per sensors/tortured_phrases_detector.py's own docstring,
+    slightly higher than ai_text_tell's 2.0 since a garbled scientific term
+    is a more specific tell than a generic "as an AI language model" phrase.
+    Low corpus yield (1/794 on a near-full sweep) so the Stage that computes
+    it is no longer routine -- see review/pipeline_app.py -- but the weight
+    still applies whenever the property IS set, whether from a routine sweep
+    or a manual --doi spot-check.)
   - p_value_hacking_flag_count: weight 0.5 (lowest weight -- plan.md explicitly
     flags this sensor as noisy given the small per-paper p-value sample; see
     sensors/p_value_hacking_detector.py docstring)
@@ -269,6 +278,7 @@ DEFAULT_WEIGHTS = {
     "external_retracted_citation_flag_count": 2.0,
     "journal_integrity_flag_count": 1.0,
     "ai_text_tell_flag_count": 2.0,
+    "tortured_phrase_flag_count": 2.5,
     "p_value_hacking_flag_count": 0.5,
     "pubmed_eoc_flag": 10.0,
     "pubmed_erratum_flag": 0.3,
@@ -426,6 +436,7 @@ RETURN p.doi AS doi,
        coalesce(p.reference_integrity_flag_count, 0) AS ref_count,
        coalesce(p.journal_integrity_flag_count, 0) AS journal_count,
        coalesce(p.ai_text_tell_flag_count, 0) AS ai_count,
+       coalesce(p.tortured_phrase_flag_count, 0) AS tortured_count,
        coalesce(p.p_value_hacking_flag_count, 0) AS pval_count,
        CASE WHEN p.pubmed_eoc_status = "expression_of_concern" THEN 1 ELSE 0 END AS eoc_flag,
        CASE WHEN p.pubmed_eoc_status = "erratum_only" THEN 1 ELSE 0 END AS erratum_flag,
@@ -471,6 +482,7 @@ RETURN p.doi AS doi,
        p.reference_integrity_flags AS ref_flags,
        p.journal_integrity_flags AS journal_flags,
        p.ai_text_tell_flags AS ai_flags,
+       p.tortured_phrase_flags AS tortured_flags,
        p.p_value_hacking_flags AS pval_flags
 """
 
@@ -484,6 +496,7 @@ def calculate_score(row: dict) -> float:
         # reference_integrity_flag_count deliberately excluded -- see WEIGHTS comment above
         row["journal_count"] * WEIGHTS["journal_integrity_flag_count"] +
         row["ai_count"] * WEIGHTS["ai_text_tell_flag_count"] +
+        row["tortured_count"] * WEIGHTS["tortured_phrase_flag_count"] +
         row["pval_count"] * WEIGHTS["p_value_hacking_flag_count"] +
         row["eoc_flag"] * WEIGHTS["pubmed_eoc_flag"] +
         row["erratum_flag"] * WEIGHTS["pubmed_erratum_flag"] +
@@ -546,6 +559,7 @@ def main() -> None:
             "reference_integrity_count": row["ref_count"],
             "journal_integrity_count": row["journal_count"],
             "ai_text_tell_count": row["ai_count"],
+            "tortured_phrase_count": row["tortured_count"],
             "p_value_hacking_count": row["pval_count"],
             "expression_of_concern": "Y" if row["eoc_flag"] else "",
             "eoc_date": row["eoc_date"] or "",
@@ -608,6 +622,7 @@ def main() -> None:
         "reference_integrity_count",
         "journal_integrity_count",
         "ai_text_tell_count",
+        "tortured_phrase_count",
         "p_value_hacking_count",
         "expression_of_concern",
         "eoc_date",
@@ -690,7 +705,7 @@ def main() -> None:
         print(f"  {i}. [{r['score']:.1f}] {r['title'][:70]}...", file=sys.stderr)
         print(f"     ret{r['retracted_citation_count']} extret{r['external_retracted_citation_count']} "
               f"ref{r['reference_integrity_count']} "
-              f"jrnl{r['journal_integrity_count']} ai{r['ai_text_tell_count']} "
+              f"jrnl{r['journal_integrity_count']} ai{r['ai_text_tell_count']} tp{r['tortured_phrase_count']} "
               f"mid_any{r['mid_any_count']} mid_mc{r['mid_misconduct_count']} "
               f"fl_any{r['fl_any_count']} fl_mc{r['fl_misconduct_count']} "
               f"irr_ext{r['institution_retr_rate_external']} prr{r['publisher_retr_rate']} crr{r['country_retr_rate']} "

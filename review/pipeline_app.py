@@ -150,7 +150,15 @@ STAGES: list[Stage] = [
           "~30 min -- full-text based, shares the cache the previous stage warmed."),
     Stage("tortured_phrases_detector", "tortured_phrases_detector.py", "phase4",
           [PYTHON, "sensors/tortured_phrases_detector.py", "--limit", "800"],
-          "~30 min -- full-text based, shares the cache the earlier stages warmed."),
+          "~30 min -- full-text based, shares the cache the earlier stages warmed. "
+          "MOVED OUT OF ROUTINE RERUNS (2026-08-17): a confirmed near-full-corpus scan "
+          "(this Stage's own --limit 800) found only 1/794 hits -- same shrinking-yield "
+          "situation as ai_text_tell_detector above, and the same ~30min cost every run "
+          "regardless. Kept runnable manually here, or per-paper via --doi (now writes "
+          "graph properties for that one paper, not just stdout -- see script docstring) "
+          "for a paperconan-style on-demand check when a PubPeer tip or a manual read "
+          "suggests a specific paper is worth it.",
+          optional=True),
     Stage("reference_integrity_checker", "reference_integrity_checker.py", "phase4",
           [PYTHON, "sensors/reference_integrity_checker.py"],
           "~2 HOURS. NOT scored (its no-DOI bibliographic-search route has a ~71% false-"

@@ -28,10 +28,37 @@ Severity:
 
 Output: one flag record per (paper, phrase) pair, plus an aggregated report.
 
+ROUTINE STATUS (2026-08-17): moved OUT of pipeline_app.py's automatic "Run
+all" (Stage now optional=True), same demotion ai_text_tell_detector.py got
+on 2026-07-22 and for the same reason -- a near-full-corpus run (--limit 800,
+this project's own routine stage) found only 1/794 hits, and every run costs
+~30 min of full-text fetching regardless of hit count. The Favourites-list
+precision isn't in question (both matches on the one hit were genuine, exact
+phrases); the corpus just doesn't have much of this particular tell in it.
+Kept runnable manually -- via pipeline_app.py's single-button opt-in, or
+directly as below -- for whoever wants a full-corpus sweep occasionally.
+
+--doi is the intended everyday path (2026-08-17): the paperconan-style
+"on a hunch" workflow -- a reviewer sees a PubPeer tip, or something reads
+oddly, and spot-checks that one paper. Unlike the old stdout-only behaviour,
+--doi now ALSO writes tortured_phrase_flag_count / tortured_phrase_flags
+straight onto that one Paper node (same properties wire_sensor_flags.py
+writes in the batch path), so a manual hit shows up in scoring and the
+review page exactly like a routine-run hit would, not just printed once and
+lost. Only that single DOI's properties are touched -- no reset of any
+other paper, so this is always safe to run standalone between full sweeps.
+
+SCORING: tortured_phrase_flag_count is a scored signal (see WEIGHTS in
+tier_a_scoring.py), unlike cabanac_chatgpt_checker.py's deliberately-
+unscored calibration list -- this detector's own full-text match is direct,
+low-false-positive evidence about THIS paper's own text (an exact multi-word
+phrase match, not an ecological/other-paper signal), which is exactly what
+plan.md §0 asks a scored point to be.
+
 Usage:
-  python sensors/tortured_phrases_detector.py                  # all candidates
-  python sensors/tortured_phrases_detector.py --doi 10.xxx/xxx  # single paper
-  python sensors/tortured_phrases_detector.py --sample 5         # spot-check N
+  python sensors/tortured_phrases_detector.py                  # all candidates (--limit 800 for full coverage)
+  python sensors/tortured_phrases_detector.py --doi 10.xxx/xxx  # single paper -- prints AND writes graph properties
+  python sensors/tortured_phrases_detector.py --sample 5         # spot-check N (stdout report only, no graph write)
 """
 from __future__ import annotations
 
@@ -131,57 +158,75 @@ def main() -> None:
 
     conn = resolve_connection()
     driver = GraphDatabase.driver(conn["uri"], auth=(conn["user"], conn["password"]))
-    with driver.session(database=conn["database"]) as s:
-        limit = 1 if args.doi else (args.sample or args.limit)
-        rows = [dict(r) for r in s.run(QUERY, doi=args.doi, limit=limit)]
-    driver.close()
+    try:
+        with driver.session(database=conn["database"]) as s:
+            limit = 1 if args.doi else (args.sample or args.limit)
+            rows = [dict(r) for r in s.run(QUERY, doi=args.doi, limit=limit)]
 
-    all_flags: list[dict] = []
-    fetched = 0
-    found = 0
-    for row in rows:
-        doi = row["doi"]
-        title = row["title"]
-        if args.refresh:
-            cache_file = CACHE_DIR / f"{canon_doi(doi).replace('/', '__')}.json"
-            if cache_file.exists():
-                cache_file.unlink()
-        res = fetch_full_text(doi, CACHE_DIR)
-        fetched += 1
-        if res["status"] != "ok":
-            continue
-        matches = find_matches(res["text"], phrases)
-        if matches:
-            found += 1
-        for phrase, snippet in matches:
-            all_flags.append(build_flag(doi, title, phrase, snippet))
-        if args.doi:
-            if not matches:
-                print(f"no tortured phrases found in {doi}")
-            for f in matches:
-                print(json.dumps(build_flag(doi, title, f[0], f[1]), indent=2))
-            return
+        all_flags: list[dict] = []
+        fetched = 0
+        found = 0
+        for row in rows:
+            doi = row["doi"]
+            title = row["title"]
+            if args.refresh:
+                cache_file = CACHE_DIR / f"{canon_doi(doi).replace('/', '__')}.json"
+                if cache_file.exists():
+                    cache_file.unlink()
+            res = fetch_full_text(doi, CACHE_DIR)
+            fetched += 1
+            if res["status"] != "ok":
+                continue
+            matches = find_matches(res["text"], phrases)
+            if matches:
+                found += 1
+            paper_flags = [build_flag(doi, title, phrase, snippet) for phrase, snippet in matches]
+            all_flags.extend(paper_flags)
+            if args.doi:
+                if not paper_flags:
+                    print(f"no tortured phrases found in {doi}")
+                for f in paper_flags:
+                    print(json.dumps(f, indent=2))
+                # Single-paper mode writes straight to this one Paper node --
+                # same tortured_phrase_flag_count/tortured_phrase_flags
+                # properties wire_sensor_flags.py writes in the batch path
+                # (see module docstring, 2026-08-17), so a manual, hunch-
+                # driven run shows up in scoring/review like a routine-run
+                # hit would, instead of vanishing once the terminal scrolls.
+                # Only this DOI is touched -- no reset of any other paper's
+                # existing flags, unlike the batch path's corpus-wide reset.
+                with driver.session(database=conn["database"]) as s:
+                    s.run(
+                        "MATCH (p:Paper {doi: $doi}) "
+                        "SET p.tortured_phrase_flag_count = $count, "
+                        "    p.tortured_phrase_flags = $flags_json",
+                        doi=doi, count=len(paper_flags), flags_json=json.dumps(paper_flags),
+                    )
+                print(f"\n  wrote tortured_phrase_flag_count={len(paper_flags)} to {doi}")
+                return
 
-    # Aggregate report
-    REPORT_JSON.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_JSON.write_text(json.dumps(all_flags, indent=2))
+        # Aggregate report (full/batch runs only -- single-DOI mode returns above)
+        REPORT_JSON.parent.mkdir(parents=True, exist_ok=True)
+        REPORT_JSON.write_text(json.dumps(all_flags, indent=2))
 
-    by_paper: dict[str, list[dict]] = {}
-    for f in all_flags:
-        by_paper.setdefault(f["paper_doi"], []).append(f)
+        by_paper: dict[str, list[dict]] = {}
+        for f in all_flags:
+            by_paper.setdefault(f["paper_doi"], []).append(f)
 
-    print("=== tortured-phrases-detector ===")
-    print(f"  papers fetched      : {fetched}")
-    print(f"  papers with match   : {found}")
-    print(f"  total flag records  : {len(all_flags)}")
-    print(f"  distinct phrases hit: {len({f['phrase'] for f in all_flags})}")
-    print(f"\n  report written -> {REPORT_JSON.relative_to(REPO_ROOT)}")
+        print("=== tortured-phrases-detector ===")
+        print(f"  papers fetched      : {fetched}")
+        print(f"  papers with match   : {found}")
+        print(f"  total flag records  : {len(all_flags)}")
+        print(f"  distinct phrases hit: {len({f['phrase'] for f in all_flags})}")
+        print(f"\n  report written -> {REPORT_JSON.relative_to(REPO_ROOT)}")
 
-    top = sorted(by_paper.items(), key=lambda kv: -len(kv[1]))[:5]
-    if top:
-        print("\n  top papers by phrase count:")
-        for doi, fl in top:
-            print(f"    [{len(fl)}] {fl[0]['paper_title'][:80]}  ({doi})")
+        top = sorted(by_paper.items(), key=lambda kv: -len(kv[1]))[:5]
+        if top:
+            print("\n  top papers by phrase count:")
+            for doi, fl in top:
+                print(f"    [{len(fl)}] {fl[0]['paper_title'][:80]}  ({doi})")
+    finally:
+        driver.close()
 
 
 if __name__ == "__main__":

@@ -102,6 +102,7 @@ RETURN p.doi AS doi,
        coalesce(p.reference_integrity_flag_count, 0) AS ref_count,
        coalesce(p.journal_integrity_flag_count, 0) AS journal_count,
        coalesce(p.ai_text_tell_flag_count, 0) AS ai_count,
+       coalesce(p.tortured_phrase_flag_count, 0) AS tortured_count,
        coalesce(p.mid_any_count, 0) AS mid_any_count,
        coalesce(p.mid_misconduct_count, 0) AS mid_misconduct_count,
        coalesce(p.fl_any_count, 0) AS fl_any_count,
@@ -153,7 +154,8 @@ RETURN p.doi AS doi,
        p.external_retracted_citation_flags AS ext_ret_flags,
        p.reference_integrity_flags AS ref_flags,
        p.journal_integrity_flags AS journal_flags,
-       p.ai_text_tell_flags AS ai_flags
+       p.ai_text_tell_flags AS ai_flags,
+       p.tortured_phrase_flags AS tortured_flags
 """
 
 # Restricted to MIDDLE position (2026-07-22) -- first/last co-authors moved
@@ -190,6 +192,7 @@ def calculate_score(row: dict) -> float:
         # reference_integrity_flag_count deliberately excluded -- see tier_a_scoring.py WEIGHTS comment
         row["journal_count"] * WEIGHTS["journal_integrity_flag_count"] +
         row["ai_count"] * WEIGHTS["ai_text_tell_flag_count"] +
+        row["tortured_count"] * WEIGHTS["tortured_phrase_flag_count"] +
         minmax_contribution("mid_any_count", row["mid_any_count"]) +
         minmax_contribution("mid_misconduct_count", row["mid_misconduct_count"]) +
         minmax_contribution("fl_any_count", row["fl_any_count"]) +
@@ -309,6 +312,19 @@ def main() -> None:
                     "weight": WEIGHTS["ai_text_tell_flag_count"],
                     "contribution": row["ai_count"] * WEIGHTS["ai_text_tell_flag_count"],
                     "examples": [f.get("pattern") for f in ai_flags[:3]],
+                })
+
+            if row["tortured_count"] > 0:
+                tortured_flags = json.loads(row["tortured_flags"] or "[]")
+                flags_summary.append({
+                    "type": "tortured_phrase",
+                    "count": row["tortured_count"],
+                    "weight": WEIGHTS["tortured_phrase_flag_count"],
+                    "contribution": row["tortured_count"] * WEIGHTS["tortured_phrase_flag_count"],
+                    "examples": [f.get("phrase") for f in tortured_flags[:3]],
+                    "note": ("Exact multi-word match against Cabanac's PPS \"Favourite Tortured "
+                             "Phrases\" list -- a garbled paraphrase of a standard scientific term "
+                             "(e.g. \"bosom peril\" for breast cancer), near-zero false positive."),
                 })
 
             if row["mid_misconduct_count"] > 0:

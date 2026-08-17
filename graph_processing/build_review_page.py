@@ -74,6 +74,7 @@ TAG_LABELS = [
     ("known-miller", "Known miller co-author"),
     ("cabanac-chatgpt", "ChatGPT text tell (Cabanac)"),
     ("ai", "AI-text tells"),
+    ("tortured", "Tortured phrase"),
     ("pval", "p-value pattern"),
     ("erratum", "Erratum"),
     ("pubpeer", "PubPeer"),
@@ -146,6 +147,7 @@ RETURN p.doi AS doi, p.title AS title, j.name AS journal,
        coalesce(p.reference_integrity_flag_count, 0) AS ref_count,
        coalesce(p.journal_integrity_flag_count, 0) AS journal_count,
        coalesce(p.ai_text_tell_flag_count, 0) AS ai_count,
+       coalesce(p.tortured_phrase_flag_count, 0) AS tortured_count,
        coalesce(p.p_value_hacking_flag_count, 0) AS pval_count,
        CASE WHEN p.pubmed_eoc_status = "expression_of_concern" THEN 1 ELSE 0 END AS eoc_flag,
        CASE WHEN p.pubmed_eoc_status = "erratum_only" THEN 1 ELSE 0 END AS erratum_flag,
@@ -211,6 +213,7 @@ RETURN p.doi AS doi, p.title AS title, j.name AS journal,
        p.reference_integrity_flags AS ref_flags,
        p.journal_integrity_flags AS journal_flags,
        p.ai_text_tell_flags AS ai_flags,
+       p.tortured_phrase_flags AS tortured_flags,
        p.p_value_hacking_flags AS pval_flags
 """
 
@@ -283,6 +286,7 @@ def score(r: dict) -> float:
         # reference_integrity_flag_count deliberately excluded -- see tier_a_scoring.py WEIGHTS comment
         + r["journal_count"] * WEIGHTS["journal_integrity_flag_count"]
         + r["ai_count"] * WEIGHTS["ai_text_tell_flag_count"]
+        + r["tortured_count"] * WEIGHTS["tortured_phrase_flag_count"]
         + r["pval_count"] * WEIGHTS["p_value_hacking_flag_count"]
         + r["eoc_flag"] * WEIGHTS["pubmed_eoc_flag"]
         + r["erratum_flag"] * WEIGHTS["pubmed_erratum_flag"]
@@ -307,7 +311,7 @@ SCORED_TAGS = {
     "cites-retracted", "cites-retracted-ext",
     "correction", "journal", "journal-high-retr", "publisher-high-retr",
     "institution-high-retr", "country-high-retr",
-    "ai", "pval", "erratum", "paperconan",
+    "ai", "tortured", "pval", "erratum", "paperconan",
 }
 
 
@@ -355,6 +359,7 @@ def chip_contributions(r: dict) -> dict[str, float]:
         "journal-high-retr": minmax_contribution("journal_retr_rate_external", r["journal_retr_rate_external"]),
         "publisher-high-retr": minmax_contribution("publisher_retr_rate", r["publisher_retr_rate"]),
         "ai": r["ai_count"] * WEIGHTS["ai_text_tell_flag_count"],
+        "tortured": r["tortured_count"] * WEIGHTS["tortured_phrase_flag_count"],
         "pval": r["pval_count"] * WEIGHTS["p_value_hacking_flag_count"],
         "erratum": r["erratum_flag"] * WEIGHTS["pubmed_erratum_flag"],
         "paperconan": (
@@ -702,6 +707,20 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
         if len(flags) > 4:
             pats += f' <span class="muted">…and {len(flags) - 4} more</span>'
         parts.append(row(f'AI-text tells ({r["ai_count"]})', r["ai_count"] * WEIGHTS["ai_text_tell_flag_count"], pats, tag="ai"))
+
+    if r["tortured_count"] > 0:
+        tflags = json.loads(r["tortured_flags"] or "[]")
+        phrases = ", ".join(f'"{esc(f.get("phrase"))}"' for f in tflags[:4])
+        if len(tflags) > 4:
+            phrases += f' <span class="muted">…and {len(tflags) - 4} more</span>'
+        parts.append(row(
+            f'Tortured phrase ({r["tortured_count"]})',
+            r["tortured_count"] * WEIGHTS["tortured_phrase_flag_count"],
+            f'{phrases} <span class="muted">-- exact match against Cabanac\'s PPS "Favourite '
+            f'Tortured Phrases" list, a garbled paraphrase of a standard scientific term '
+            f'(e.g. "bosom peril" for breast cancer); near-zero false positive.</span>',
+            tag="tortured",
+        ))
 
     if r["pval_count"] > 0:
         flags = json.loads(r["pval_flags"] or "[]")
@@ -1082,6 +1101,8 @@ def main() -> None:
                 badges.append('<span class="badge badge-flag" title="Confirmed by Guillaume Cabanac\'s Problematic Paper Screener -- see review context below">🤖 ChatGPT text tell (Cabanac)</span>'); tags.append("cabanac-chatgpt")
             if r["ai_count"] > 0:
                 badges.append(f'<span class="badge badge-flag">AI-text tells ({r["ai_count"]})</span>'); tags.append("ai")
+            if r["tortured_count"] > 0:
+                badges.append(f'<span class="badge badge-flag" title="Exact match against Cabanac\'s Problematic Paper Screener \'Favourite Tortured Phrases\' list">Tortured phrase ({r["tortured_count"]})</span>'); tags.append("tortured")
             if r["pval_count"] > 0:
                 badges.append(f'<span class="badge badge-flag">p-value pattern ({r["pval_count"]})</span>'); tags.append("pval")
             if r["erratum_flag"]:
