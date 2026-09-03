@@ -145,7 +145,7 @@ def build_flag(doi: str, title: str, phrase: str, snippet: str) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--doi", help="check a single paper by DOI (stdout only)")
+    ap.add_argument("--doi", help="check a single paper by DOI (writes tortured_phrase_flag_count/tortured_phrase_flags to that Paper node)")
     ap.add_argument("--sample", type=int, help="spot-check N papers")
     ap.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="max papers to fetch")
     ap.add_argument("--refresh", action="store_true", help="ignore cached full text")

@@ -23,6 +23,14 @@ retracted_citation_flag_count: 3.0        # citing known-retracted work (graph-i
 external_retracted_citation_flag_count: 2.0  # citing a retracted paper outside our RW-seeded corpus (confirmed live via OpenAlex)
 journal_integrity_flag_count: 1.0         # publishing in a compromised/predatory-flagged journal
 ai_text_tell_flag_count: 2.0              # obvious AI-generated text
+tortured_phrase_flag_count: 2.5           # added 2026-08-17: exact multi-word match against Cabanac's PPS
+                                           # "Favourite Tortured Phrases" list; near-zero false positive per
+                                           # sensors/tortured_phrases_detector.py's own docstring, slightly higher
+                                           # than ai_text_tell_flag_count's 2.0 since a garbled scientific term is
+                                           # a more specific tell than a generic "as an AI language model" phrase.
+                                           # Was previously only in tier_a_scoring.py's hardcoded DEFAULT_WEIGHTS,
+                                           # not here -- backfilled 2026-09-03 so this weight is actually the
+                                           # git-tracked, user-editable one the module docstring promises.
 p_value_hacking_flag_count: 0.5           # lowest weight -- noisy given small per-paper p-value samples
 pubmed_eoc_flag: 10.0                     # formal, dated, journal-issued Expression of Concern (raised from 2.5, 2026-07-22, user request)
 pubmed_erratum_flag: 0.3                  # weak signal -- most errata are benign corrections

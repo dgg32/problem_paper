@@ -149,64 +149,81 @@ def assess_text(text: str, paper_doi: str, paper_title: str) -> list[dict]:
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--doi", help="check a single paper by DOI (stdout only)")
+    ap.add_argument("--doi", help="check a single paper by DOI (writes ai_text_tell_flag_count/ai_text_tell_flags to that Paper node)")
     ap.add_argument("--sample", type=int, help="spot-check N random papers")
     args = ap.parse_args()
 
     conn = resolve_connection()
     driver = GraphDatabase.driver(conn["uri"], auth=(conn["user"], conn["password"]))
-    with driver.session(database=conn["database"]) as s:
-        rows = [dict(r) for r in s.run(
-            QUERY,
-            doi=args.doi,
-            limit=args.sample or 100
-        )]
-    driver.close()
+    try:
+        with driver.session(database=conn["database"]) as s:
+            rows = [dict(r) for r in s.run(
+                QUERY,
+                doi=args.doi,
+                limit=args.sample or 100
+            )]
 
-    all_flags = []
-    for i, row in enumerate(rows, 1):
-        result = fetch_full_text(row["doi"], cache_dir=CACHE_DIR)
-        if result.get("status") != "ok":
-            continue  # Skip if no text available
+        all_flags = []
+        for i, row in enumerate(rows, 1):
+            result = fetch_full_text(row["doi"], cache_dir=CACHE_DIR)
+            if result.get("status") != "ok":
+                continue  # Skip if no text available
 
-        text = result.get("text", "")
-        flags = assess_text(text, row["doi"], row["title"])
-        all_flags.extend(flags)
+            text = result.get("text", "")
+            flags = assess_text(text, row["doi"], row["title"])
+            all_flags.extend(flags)
 
-        if not args.doi and i % 10 == 0:
-            print(f"  [{i}/{len(rows)}]", file=sys.stderr)
+            if not args.doi and i % 10 == 0:
+                print(f"  [{i}/{len(rows)}]", file=sys.stderr)
 
-    if args.doi:
-        if not all_flags:
-            print(f"no ai-text-tell flags for {args.doi}")
+        if args.doi:
+            if not all_flags:
+                print(f"no ai-text-tell flags for {args.doi}")
+            for f in all_flags:
+                print(json.dumps(f, indent=2))
+            # Single-paper mode writes straight to this one Paper node -- same
+            # ai_text_tell_flag_count/ai_text_tell_flags properties
+            # wire_sensor_flags.py writes in the batch path, so a manual,
+            # hunch-driven run shows up in scoring/review like a routine-run
+            # hit would, instead of vanishing once the terminal scrolls.
+            # Only this DOI is touched -- no reset of any other paper's
+            # existing flags, unlike the batch path's corpus-wide reset.
+            with driver.session(database=conn["database"]) as s:
+                s.run(
+                    "MATCH (p:Paper {doi: $doi}) "
+                    "SET p.ai_text_tell_flag_count = $count, "
+                    "    p.ai_text_tell_flags = $flags_json",
+                    doi=args.doi, count=len(all_flags), flags_json=json.dumps(all_flags),
+                )
+            print(f"\n  wrote ai_text_tell_flag_count={len(all_flags)} to {args.doi}")
+            return
+
+        # Aggregate for report (full/batch runs only -- single-DOI mode returns above)
+        by_paper: dict[str, list[dict]] = {}
+        counts = {"high": 0, "medium": 0}
         for f in all_flags:
-            print(json.dumps(f, indent=2))
-        return
+            by_paper.setdefault(f["paper_doi"], []).append(f)
+            counts[f["severity"]] += 1
 
-    # Aggregate for report
-    by_paper: dict[str, list[dict]] = {}
-    counts = {"high": 0, "medium": 0}
-    for f in all_flags:
-        by_paper.setdefault(f["paper_doi"], []).append(f)
-        counts[f["severity"]] += 1
+        REPORT_JSON.parent.mkdir(parents=True, exist_ok=True)
+        REPORT_JSON.write_text(json.dumps(all_flags, indent=2))
 
-    REPORT_JSON.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_JSON.write_text(json.dumps(all_flags, indent=2))
+        print("\n=== ai-text-tell-detector ===")
+        print(f"  papers scanned      : {len(rows)}")
+        print(f"  papers with flags   : {len(by_paper)}")
+        print(f"  total flag records  : {len(all_flags)}")
+        print(f"    high   : {counts['high']}")
+        print(f"    medium : {counts['medium']}")
+        print(f"\n  report written -> {REPORT_JSON.relative_to(REPO_ROOT)}")
 
-    print("\n=== ai-text-tell-detector ===")
-    print(f"  papers scanned      : {len(rows)}")
-    print(f"  papers with flags   : {len(by_paper)}")
-    print(f"  total flag records  : {len(all_flags)}")
-    print(f"    high   : {counts['high']}")
-    print(f"    medium : {counts['medium']}")
-    print(f"\n  report written -> {REPORT_JSON.relative_to(REPO_ROOT)}")
-
-    if by_paper:
-        top = sorted(by_paper.items(), key=lambda kv: -len(kv[1]))[:5]
-        print("\n  top candidates by flag count:")
-        for doi, fl in top:
-            high = len([f for f in fl if f["severity"] == "high"])
-            print(f"    [{len(fl)} ({high} HIGH)] {fl[0]['paper_title'][:70]}  ({doi})")
+        if by_paper:
+            top = sorted(by_paper.items(), key=lambda kv: -len(kv[1]))[:5]
+            print("\n  top candidates by flag count:")
+            for doi, fl in top:
+                high = len([f for f in fl if f["severity"] == "high"])
+                print(f"    [{len(fl)} ({high} HIGH)] {fl[0]['paper_title'][:70]}  ({doi})")
+    finally:
+        driver.close()
 
 
 if __name__ == "__main__":

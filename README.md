@@ -99,6 +99,7 @@ PubMed (fallback)                 │                (weighted, sourced facts
 | `AGENTS.md` | Conventions for anyone (human or agent) working in this repo — wrapper scripts, naming, scoring discipline, privacy, reproduction. |
 | `graph_processing/` | Loader, enrichment, identity resolution, targeted expansion, GDS scoring, the Tier-A scoring engine, and the review-page builder. |
 | `sensors/` | The Phase-4 "flag sensor" skills — one script per independent signal (citations to retracted work, tortured phrases, AI-text tells, PubPeer, journal integrity, reference integrity, image-reuse screens, ...). Each emits evidence, never a verdict. |
+| `graph_processing/run_content_sensors_on_selection.py` | Runs the content-based sensors (full-text + paperconan) on a reviewer-picked DOI shortlist, on demand — see §4.1. |
 | `config/weights.yaml` | The only place scoring weights live; git-tracked so `git log -p` is the audit trail for every weight change. |
 | `runs/` | One archived folder per `paperconan` run (inputs, verbatim tool output, a hand-written `CONCLUSION.md`). See `runs/README.md`. |
 | `review/` | The generated, **private, git-ignored** HTML review queue, plus the pipeline-execution dashboard. See `review/README.md` — never publish or share `review/*.html`, it names real researchers. |
@@ -201,6 +202,49 @@ uvicorn review.pipeline_app:app --reload --port 8800
 # Deep numeric forensics on one paper (never call the paperconan CLI directly)
 python runs/run_paperconan.py 10.3389/fimmu.2018.00063
 ```
+
+### 4.1 On-demand content-based sensors (targeted review)
+
+The Phase-4 sensors above split into two kinds. **Metadata-based** sensors
+(citations to retracted work, journal/institution/publisher retraction
+rates, author retraction history, ...) run automatically corpus-wide via
+`wire_sensor_flags.py` and are cheap. **Content-based** sensors
+(`tortured_phrases_detector.py`, `ai_text_tell_detector.py`,
+`p_value_hacking_detector.py`, plus `paperconan`) need a paper's actual
+full text or data tables, are slower, and are meant to be run only on
+papers a reviewer has already flagged as worth a closer look — never
+corpus-wide.
+
+The loop:
+
+```bash
+# 1. Score the whole corpus on metadata alone (fast, already automatic)
+python graph_processing/tier_a_scoring.py --top 500 -o data/tier_a_triage_full.csv
+
+# 2. Pick a shortlist by eye from that CSV / review/index.html, one DOI per line
+printf '10.1155/2016/2537294\n10.1016/j.nmni.2017.11.003\n' > shortlist.txt
+
+# 3. Run the content-based sensors on just that shortlist
+python graph_processing/run_content_sensors_on_selection.py --doi-file shortlist.txt
+# add --skip-paperconan to run the 3 text sensors only, or --skip-text-sensors
+# for paperconan only; --refresh ignores cached full text/data
+
+# 4. Hand-adjudicate any paperconan runs it flags (never automatic --
+#    see runs/README.md and plan.md §0): edit `adjudicated:` in
+#    runs/<doi>/meta.yaml to needs_human/confirmed/benign/false_positive
+
+# 5. Re-score -- tier_a_scoring.py re-reads Neo4j + runs/*/meta.yaml fresh
+#    every time, so this picks up the new evidence with no wiring step
+python graph_processing/tier_a_scoring.py --top 500 -o data/tier_a_triage_full.csv
+```
+
+Each sensor's `--doi` mode writes straight to that one `Paper` node, so this
+never touches `wire_sensor_flags.py` or any paper outside the shortlist —
+running it repeatedly on the same DOI just overwrites that DOI's own flags.
+Expect a lot of 0-flag results: full-text coverage on this corpus is thin
+(most candidates come back `not_open_access`), so a 0 usually means "no text
+to check," not "checked and clean" — the point of this step is a cheap
+second pass on the papers that already look suspicious, not a guarantee.
 
 ## 5. Privacy
 

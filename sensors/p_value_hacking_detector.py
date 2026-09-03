@@ -196,58 +196,72 @@ def assess_paper(doi: str, title: str, text: str, text_source: str) -> dict | No
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--doi", help="check a single paper by DOI (stdout only)")
+    ap.add_argument("--doi", help="check a single paper by DOI (writes p_value_hacking_flag_count/p_value_hacking_flags to that Paper node)")
     ap.add_argument("--sample", type=int, help="spot-check N papers")
     args = ap.parse_args()
 
     conn = resolve_connection()
     driver = GraphDatabase.driver(conn["uri"], auth=(conn["user"], conn["password"]))
-    with driver.session(database=conn["database"]) as s:
-        rows = [dict(r) for r in s.run(
-            QUERY,
-            doi=args.doi,
-            limit=1 if args.doi else (args.sample or 100),
-        )]
-    driver.close()
+    try:
+        with driver.session(database=conn["database"]) as s:
+            rows = [dict(r) for r in s.run(
+                QUERY,
+                doi=args.doi,
+                limit=1 if args.doi else (args.sample or 100),
+            )]
 
-    all_flags = []
-    for i, row in enumerate(rows, 1):
-        text, source = get_text(row["doi"], row.get("pdf_markdown_path"))
-        if not text:
-            continue
-        flag = assess_paper(row["doi"], row["title"], text, source)
-        if flag:
-            all_flags.append(flag)
-        if not args.doi and i % 10 == 0:
-            print(f"  [{i}/{len(rows)}]", file=sys.stderr)
+        all_flags = []
+        for i, row in enumerate(rows, 1):
+            text, source = get_text(row["doi"], row.get("pdf_markdown_path"))
+            if not text:
+                continue
+            flag = assess_paper(row["doi"], row["title"], text, source)
+            if flag:
+                all_flags.append(flag)
+            if not args.doi and i % 10 == 0:
+                print(f"  [{i}/{len(rows)}]", file=sys.stderr)
 
-    if args.doi:
-        if not all_flags:
-            print(f"no p-value-hacking flags for {args.doi} (checked {len(rows)} paper(s); "
-                  f"either no text available or no suspicious pattern found)")
+        if args.doi:
+            if not all_flags:
+                print(f"no p-value-hacking flags for {args.doi} (checked {len(rows)} paper(s); "
+                      f"either no text available or no suspicious pattern found)")
+            for f in all_flags:
+                print(json.dumps(f, indent=2))
+            # Single-paper mode writes straight to this one Paper node -- same
+            # p_value_hacking_flag_count/p_value_hacking_flags properties
+            # wire_sensor_flags.py writes in the batch path. Only this DOI is
+            # touched -- no reset of any other paper's existing flags.
+            with driver.session(database=conn["database"]) as s:
+                s.run(
+                    "MATCH (p:Paper {doi: $doi}) "
+                    "SET p.p_value_hacking_flag_count = $count, "
+                    "    p.p_value_hacking_flags = $flags_json",
+                    doi=args.doi, count=len(all_flags), flags_json=json.dumps(all_flags),
+                )
+            print(f"\n  wrote p_value_hacking_flag_count={len(all_flags)} to {args.doi}")
+            return
+
+        counts = {"medium": 0, "low": 0}
         for f in all_flags:
-            print(json.dumps(f, indent=2))
-        return
+            counts[f["severity"]] += 1
 
-    counts = {"medium": 0, "low": 0}
-    for f in all_flags:
-        counts[f["severity"]] += 1
+        REPORT_JSON.parent.mkdir(parents=True, exist_ok=True)
+        REPORT_JSON.write_text(json.dumps(all_flags, indent=2))
 
-    REPORT_JSON.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_JSON.write_text(json.dumps(all_flags, indent=2))
+        print("\n=== p-value-hacking-detector ===")
+        print(f"  papers scanned      : {len(rows)}")
+        print(f"  papers with flags   : {len(all_flags)}")
+        print(f"    medium : {counts['medium']}")
+        print(f"    low    : {counts['low']}")
+        print(f"\n  report written -> {REPORT_JSON.relative_to(REPO_ROOT)}")
 
-    print("\n=== p-value-hacking-detector ===")
-    print(f"  papers scanned      : {len(rows)}")
-    print(f"  papers with flags   : {len(all_flags)}")
-    print(f"    medium : {counts['medium']}")
-    print(f"    low    : {counts['low']}")
-    print(f"\n  report written -> {REPORT_JSON.relative_to(REPO_ROOT)}")
-
-    if all_flags:
-        top = sorted(all_flags, key=lambda f: -f.get("n_in_lower_bin_040_050", 0))[:5]
-        print("\n  top candidates:")
-        for f in top:
-            print(f"    [{f['severity'].upper()}] {f['paper_title'][:70]}  ({f['paper_doi']})")
+        if all_flags:
+            top = sorted(all_flags, key=lambda f: -f.get("n_in_lower_bin_040_050", 0))[:5]
+            print("\n  top candidates:")
+            for f in top:
+                print(f"    [{f['severity'].upper()}] {f['paper_title'][:70]}  ({f['paper_doi']})")
+    finally:
+        driver.close()
 
 
 if __name__ == "__main__":
