@@ -79,7 +79,6 @@ MEDIUM_CONFIDENCE_PATTERNS = [
     "i apologize, but i'm an ai",
     "i should clarify that i'm an ai",
     "as an ai, i cannot",
-    "as an ai, i cannot",
     "i'm not able to",
     "certainly, here is",
     "here is the response",

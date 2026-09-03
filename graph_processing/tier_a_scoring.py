@@ -324,7 +324,16 @@ DEFAULT_WEIGHTS = {
     # less. Replaces the old weight+cap idiom entirely (2026-07-22, user request).
     "institution_retr_rate_minmax_target": 10.0,       # EXTERNAL rate (graph_processing/institution_retraction_rate.py)
     "publisher_retr_rate_minmax_target": 10.0,         # EXTERNAL rate (graph_processing/publisher_retraction_rate.py)
-    "country_retr_rate_minmax_target": 10.0,           # EXTERNAL rate (graph_processing/country_retraction_rate.py)
+    "country_retr_rate_minmax_target": 2.5,            # EXTERNAL rate (graph_processing/country_retraction_rate.py)
+                                                        # deliberately lower than the sibling targets -- see
+                                                        # config/weights.yaml's own comment: country is the
+                                                        # coarsest, most ecological (paper-non-specific) bucket,
+                                                        # so its minmax ceiling is capped harder. Was 10.0 here
+                                                        # (BUG.md R3-4, fixed 2026-09-03): weights.yaml overlays
+                                                        # this at runtime so live scoring was already correct,
+                                                        # but the fallback used if that YAML is ever missing or
+                                                        # unparseable silently re-raised this 4x past its
+                                                        # documented, reasoned value.
     "journal_retr_rate_external_minmax_target": 10.0,  # EXTERNAL rate (graph_processing/journal_retraction_rate_external.py)
     # paperconan (filesystem, not the graph — see load_paperconan_runs() above)
     "paperconan_needs_human": 2.0,      # an opened, quantified anomaly that survived adjudication

@@ -39,6 +39,7 @@ import sys
 from pathlib import Path
 
 from neo4j import GraphDatabase
+from neo4j.time import Date
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "graph_processing"))
@@ -56,6 +57,18 @@ NATURAL_KEY = {
     "Institution": "institution_id",
     "Reason": "code",
     "AuthorInstance": "instance_id",
+}
+
+# Properties the live pipeline writes as Neo4j `date()` values (expand_targets.py's
+# published_date, refresh_retraction_status.py's retraction_date -- both Paper-only).
+# APOC's JSON export serializes a Date as an ISO string, and `SET n += r.props` on a
+# plain JSON string leaves it a String, not a Date, on import -- a silent type
+# regression nothing today reads temporally (grep-verified), but a structural break
+# of "restore exactly what the pipeline would have produced" and a landmine for any
+# future Cypher that expects a real Date (BUG.md R3-14). Converted back explicitly
+# below, per label, before the write.
+DATE_PROPS = {
+    "Paper": ("published_date", "retraction_date"),
 }
 
 CONSTRAINTS = [
@@ -108,8 +121,19 @@ def main() -> None:
                     skipped_nodes += 1
                     continue
                 label, _key, val = nk
+                props = rec.get("properties", {})
+                date_props = DATE_PROPS.get(label)
+                if date_props:
+                    props = dict(props)
+                    for prop in date_props:
+                        v = props.get(prop)
+                        if isinstance(v, str):
+                            try:
+                                props[prop] = Date.from_iso_format(v)
+                            except ValueError:
+                                pass  # leave as-is rather than fail the whole import over one bad value
                 nodes_by_label.setdefault(label, []).append(
-                    {"key": val, "props": rec.get("properties", {})}
+                    {"key": val, "props": props}
                 )
             elif rec.get("type") == "relationship":
                 start_nk = node_key(rec["start"].get("labels", []), rec["start"].get("properties", {}))

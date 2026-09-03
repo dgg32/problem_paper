@@ -200,19 +200,28 @@ def main() -> None:
             driver.close()
             return
 
-        s.run("MATCH ()-[r:PROBABLY_SAME_AS]->() DELETE r")
-        for i in range(0, len(edges), BATCH):
-            s.run(
-                "UNWIND $rows AS r "
-                "MATCH (a:AuthorInstance {instance_id:r.a}), "
-                "      (b:AuthorInstance {instance_id:r.b}) "
-                "MERGE (a)-[e:PROBABLY_SAME_AS]->(b) "
-                "SET e.confidence=r.confidence, e.basis=r.basis, "
-                "    e.shared_coauthors=r.shared_coauthors, "
-                "    e.shared_institutions=r.shared_institutions, "
-                "    e.same_orcid=r.same_orcid, e.orcid_conflict=r.orcid_conflict, "
-                "    e.name_match=r.name_match",
-                rows=edges[i:i + BATCH])
+        # Delete + rewrite as ONE explicit transaction (BUG.md R3-15): each of these
+        # used to be its own auto-committed statement/batch, so a crash between the
+        # delete and the last UNWIND batch left a partial identity layer with no
+        # detection -- a subsequent cluster_instances.py run would silently cluster
+        # over the truncated edges. Wrapping them together means either every edge
+        # lands or none do; a mid-run crash now rolls back to the pre-run state
+        # instead of a half-written one.
+        with s.begin_transaction() as tx:
+            tx.run("MATCH ()-[r:PROBABLY_SAME_AS]->() DELETE r")
+            for i in range(0, len(edges), BATCH):
+                tx.run(
+                    "UNWIND $rows AS r "
+                    "MATCH (a:AuthorInstance {instance_id:r.a}), "
+                    "      (b:AuthorInstance {instance_id:r.b}) "
+                    "MERGE (a)-[e:PROBABLY_SAME_AS]->(b) "
+                    "SET e.confidence=r.confidence, e.basis=r.basis, "
+                    "    e.shared_coauthors=r.shared_coauthors, "
+                    "    e.shared_institutions=r.shared_institutions, "
+                    "    e.same_orcid=r.same_orcid, e.orcid_conflict=r.orcid_conflict, "
+                    "    e.name_match=r.name_match",
+                    rows=edges[i:i + BATCH])
+            tx.commit()
         print(f"\nwrote {len(edges)} PROBABLY_SAME_AS edges")
         verify(s)
     driver.close()

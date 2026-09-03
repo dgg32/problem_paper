@@ -83,25 +83,30 @@ def canon_doi(doi: str) -> str:
     return d
 
 
-def fetch_reference_dois(doi: str) -> list[str]:
-    """Crossref-deposited reference list for one paper -> DOIs only. A
-    reference with no DOI can't be checked here (that's reference_integrity_
+def fetch_reference_dois(doi: str) -> tuple[list[str], bool]:
+    """Crossref-deposited reference list for one paper -> (DOIs only, ok).
+    A reference with no DOI can't be checked here (that's reference_integrity_
     checker.py's job, and its no-DOI route is the one we deliberately do NOT
-    repeat, for precision reasons)."""
+    repeat, for precision reasons). `ok=False` means the fetch itself failed
+    (timeout/5xx/429) -- distinct from a paper that genuinely has no
+    references, so callers can tell "found nothing" from "couldn't check"
+    (BUG.md R3-1)."""
     try:
         url = f"{CROSSREF['base_url']}/works/{canon_doi(doi)}"
         r = requests.get(url, params={"mailto": CROSSREF["mailto"]}, timeout=10)
         r.raise_for_status()
         work = r.json().get("message", {})
     except requests.RequestException:
-        return []
-    return [canon_doi(ref["DOI"]) for ref in work.get("reference", []) if ref.get("DOI")]
+        return [], False
+    return [canon_doi(ref["DOI"]) for ref in work.get("reference", []) if ref.get("DOI")], True
 
 
-def openalex_retracted_batch(dois: list[str]) -> dict[str, dict]:
-    """One OpenAlex call for up to OPENALEX_BATCH DOIs -> {doi: {is_retracted, title}}."""
+def openalex_retracted_batch(dois: list[str]) -> tuple[dict[str, dict], bool]:
+    """One OpenAlex call for up to OPENALEX_BATCH DOIs -> ({doi: {is_retracted,
+    title}}, ok). `ok=False` means the call itself failed -- see
+    fetch_reference_dois's docstring (BUG.md R3-1)."""
     if not dois:
-        return {}
+        return {}, True
     filt = "|".join(dois)
     try:
         r = requests.get(f"{OPENALEX['base_url']}/works", params={
@@ -113,12 +118,12 @@ def openalex_retracted_batch(dois: list[str]) -> dict[str, dict]:
         r.raise_for_status()
         results = r.json().get("results", [])
     except (requests.RequestException, ValueError):
-        return {}
+        return {}, False
     out = {}
     for w in results:
         d = canon_doi(w.get("doi") or "")
         out[d] = {"is_retracted": bool(w.get("is_retracted")), "title": w.get("title")}
-    return out
+    return out, True
 
 
 def chunked(seq: list, n: int):
@@ -167,12 +172,13 @@ def main() -> None:
     print(f"  fetching reference lists for {len(candidates)} candidate(s) "
           f"(Crossref, concurrency={CROSSREF_CONCURRENCY})...")
     with ThreadPoolExecutor(max_workers=CROSSREF_CONCURRENCY) as pool:
-        ref_lists = list(pool.map(lambda c: fetch_reference_dois(c["doi"]), candidates))
+        ref_results = list(pool.map(lambda c: fetch_reference_dois(c["doi"]), candidates))
+    ref_fetch_failures = sum(1 for _, ok in ref_results if not ok)
 
     # citing_doi -> set of its EXTERNAL (not-in-graph) reference DOIs
     external_refs: dict[str, set[str]] = {}
     all_external: set[str] = set()
-    for c, refs in zip(candidates, ref_lists):
+    for c, (refs, _ok) in zip(candidates, ref_results):
         ext = {r for r in refs if r and r not in in_graph}
         if ext:
             external_refs[c["doi"]] = ext
@@ -183,9 +189,28 @@ def main() -> None:
     batches = list(chunked(sorted(all_external), OPENALEX_BATCH))
     with ThreadPoolExecutor(max_workers=OPENALEX_CONCURRENCY) as pool:
         batch_results = list(pool.map(openalex_retracted_batch, batches))
+    batch_failures = sum(1 for _, ok in batch_results if not ok)
     doi_info: dict[str, dict] = {}
-    for br in batch_results:
+    for br, _ok in batch_results:
         doi_info.update(br)
+
+    if ref_fetch_failures or batch_failures:
+        # A partial-failure report is indistinguishable from "checked, found
+        # nothing" once written -- and wire_sensor_flags.py resets this sensor's
+        # scored flag_count to 0 for every paper before rewriting from whatever
+        # report is on disk (R2-1's reset-then-recompute semantics), so a Crossref/
+        # OpenAlex outage during a routine run would otherwise silently erase
+        # every paper's previously-earned external_retracted_citation flag corpus-
+        # wide. Refuse to write instead: leave the existing report (and hence the
+        # existing graph flags) exactly as they were until a clean run succeeds
+        # (BUG.md R3-1).
+        print(f"\n  ABORTING without writing a report: {ref_fetch_failures}/{len(candidates)} "
+              f"Crossref reference-list fetch(es) and {batch_failures}/{len(batches)} OpenAlex "
+              f"batch lookup(s) failed (network/rate-limit). A partial report would look "
+              f"identical to 'checked, found nothing' to wire_sensor_flags.py and would wipe "
+              f"every paper's existing external_retracted_citation flag. Re-run when upstream "
+              f"is healthy.", file=sys.stderr)
+        sys.exit(1)
 
     retracted_dois = {d for d, info in doi_info.items() if info.get("is_retracted")}
     print(f"  {len(retracted_dois)} external DOI(s) confirmed retracted by OpenAlex")

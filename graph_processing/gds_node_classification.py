@@ -83,6 +83,11 @@ NODE_PROPS_FOR_PROJECTION = [
 # Stage A — prep: labels, node labels, domain features                        #
 # --------------------------------------------------------------------------- #
 def prep(session) -> None:
+    print("[prep] clearing stale :LabeledPaper/:CandidatePaper labels "
+          "(a retracted<->not-retracted flip since the last run must not leave a paper "
+          "in its old bucket -- BUG.md R3-7)...")
+    session.run("MATCH (p:Paper) REMOVE p:LabeledPaper, p:CandidatePaper").consume()
+
     print("[prep] setting misconduct_label + :LabeledPaper on retracted papers...")
     session.run(
         """

@@ -177,6 +177,19 @@ def main() -> None:
 
         counts[status] += 1
         if status == "none":
+            # Still an update, not a skip (BUG.md R3-5): if an earlier run wrote
+            # pubmed_eoc_status='expression_of_concern' here and PubMed no longer
+            # reports the notice (corrected, or was a transient CommentsCorrections
+            # gap), the old status/date/source must be cleared -- otherwise a stale
+            # EoC keeps contributing pubmed_eoc_flag's weight-10.0 (the single
+            # largest weight in the system) to this paper's score indefinitely.
+            updates.append({
+                "doi": r["doi"],
+                "status": "none",
+                "date": None,
+                "source_doi": None,
+                "source_citation": None,
+            })
             continue
 
         eoc_date, eoc_doi = parse_citation(source)

@@ -138,6 +138,14 @@ def crossref_search(title: str, author: str | None = None, year: int | None = No
     query = title
     if author:
         query += f" {author}"
+    if year:
+        # Was accepted but never used (BUG.md R3-12), silently defeating the
+        # module docstring's "year off by 1" garbling check: a reference whose
+        # only error is the year could still score > 50 and pass as OK. Crossref's
+        # query.bibliographic is free-text across title/author/date, so appending
+        # it as a token (same pattern as `author` above) lets a mismatched year
+        # actually pull the ranking down instead of being silently dropped.
+        query += f" {year}"
     params = {
         "query.bibliographic": query,
         "rows": 3,
@@ -315,11 +323,23 @@ def main() -> None:
     conn = resolve_connection()
     driver = GraphDatabase.driver(conn["uri"], auth=(conn["user"], conn["password"]))
     with driver.session(database=conn["database"]) as s:
-        rows = [dict(r) for r in s.run(
-            "MATCH (p:Paper {is_retracted:false}) RETURN p.doi AS doi "
-            "ORDER BY p.cited_by_count DESC LIMIT $lim",
-            lim=args.sample or 100
-        )]
+        if args.sample:
+            # --sample's help promises "random" (BUG.md R3-12); the shared
+            # top-cited-first ordering below is right for the no-flag default
+            # (scan the highest-visibility candidates first) but silently
+            # defeated a spot-check's actual purpose -- catching an unbiased
+            # cross-section, not always the same top-cited handful.
+            rows = [dict(r) for r in s.run(
+                "MATCH (p:Paper {is_retracted:false}) RETURN p.doi AS doi "
+                "ORDER BY rand() LIMIT $lim",
+                lim=args.sample
+            )]
+        else:
+            rows = [dict(r) for r in s.run(
+                "MATCH (p:Paper {is_retracted:false}) RETURN p.doi AS doi "
+                "ORDER BY p.cited_by_count DESC LIMIT $lim",
+                lim=100
+            )]
     driver.close()
 
     all_flags = []

@@ -24,17 +24,23 @@ record", NOT "downloadable as a ZIP". The OA bundle endpoint only serves
 articles in Europe PMC's open-access subset; for others it 404s even with
 hasSuppl=Y (verified: PMC5796892 is hasSuppl=Y + inPMC=Y but its ZIP endpoint
 returns 404). So this sensor HEAD-checks the ZIP endpoint before ever marking a
-paper 'downloadable'. Four states result:
+paper 'downloadable'. Five states result:
   pmc_suppl              : ZIP endpoint verified 200 — actually fetchable (the
                            useful case; the only state that sets has_pmc_suppl)
-  suppl_not_downloadable : hasSuppl=Y but the ZIP endpoint 404s — suppl exists
-                           per the record but Europe PMC can't serve it here
+  suppl_not_downloadable : hasSuppl=Y but the ZIP endpoint gave a confirmed
+                           non-200 (e.g. 404) — suppl exists per the record
+                           but Europe PMC can't serve it here
+  suppl_check_failed     : hasSuppl=Y but the HEAD request itself failed
+                           (timeout/connection error, not a server answer) —
+                           retryable, distinct from a confirmed 404 (a network
+                           hiccup must not be recorded as a permanent fact;
+                           BUG.md R3-9)
   no_pmc_suppl           : article IS in PMC but hasSuppl=N (no suppl found)
   unknown                : article not in PMC (or not indexed) — can't tell
                            (still a soft negative, not a confirmed "no")
 
 Fields written onto Paper nodes (facts, not verdicts — plan.md §0):
-  pmc_suppl_status   : one of the four states above
+  pmc_suppl_status   : one of the five states above
   has_pmc_suppl      : bool convenience (status == "pmc_suppl" — i.e. verified
                        downloadable, NOT merely hasSuppl=Y)
   pmc_suppl_url      : the supplementaryFiles ZIP endpoint, only when downloadable
@@ -68,8 +74,12 @@ BATCH = 40          # PMIDs per Europe PMC query (keeps the URL well-sized)
 REQ_INTERVAL = 0.2  # self-imposed politeness pace (~5 req/s); no stated hard limit
 
 
-def zip_available(session: requests.Session, pmcid: str) -> bool:
+def zip_available(session: requests.Session, pmcid: str) -> bool | None:
     """Does the OA supplementaryFiles ZIP endpoint actually serve this article?
+    Returns True (200), False (a confirmed non-200 -- e.g. 404, a real answer
+    from the server), or None if the request itself couldn't be completed
+    (timeout, connection reset, 5xx-as-exception) -- that last case means
+    'could not check', never 'confirmed unavailable' (BUG.md R3-9).
 
     Critical: hasSuppl=Y means 'supplementary material exists per the record', NOT
     'downloadable as a ZIP'. The OA bundle endpoint only serves articles in Europe
@@ -78,18 +88,22 @@ def zip_available(session: requests.Session, pmcid: str) -> bool:
     HEAD the endpoint before ever calling a paper's suppl 'downloadable'."""
     try:
         r = session.head(SUPPL_URL.format(pmcid=pmcid), timeout=15, allow_redirects=True)
-        return r.status_code == 200
     except requests.RequestException:
-        return False
+        return None
+    return r.status_code == 200
 
 
 def classify(rec: dict, session: requests.Session | None) -> tuple[str, str | None]:
     """(pmc_suppl_status, pmc_suppl_url) from a Europe PMC core result.
 
-    Four states:
+    Five states:
       pmc_suppl             — ZIP endpoint verified downloadable (200); url set
-      suppl_not_downloadable — hasSuppl=Y but the OA ZIP endpoint 404s (exists,
-                               not fetchable here)
+      suppl_not_downloadable — hasSuppl=Y but the OA ZIP endpoint gave a confirmed
+                               non-200 (exists per the record, not fetchable here)
+      suppl_check_failed    — hasSuppl=Y but the ZIP HEAD request itself failed
+                               (timeout/connection error) -- retryable, NOT a
+                               confirmed absence; distinct from the 404 case above
+                               (BUG.md R3-9)
       no_pmc_suppl          — in PMC, hasSuppl=N (no suppl found)
       unknown               — not in PMC (can't tell)
     Pass session=None to skip the live ZIP check (provisional, trusts hasSuppl)."""
@@ -97,9 +111,14 @@ def classify(rec: dict, session: requests.Session | None) -> tuple[str, str | No
     in_pmc = (rec.get("inPMC") or "").upper() == "Y"
     pmcid = rec.get("pmcid")
     if has_suppl and pmcid:
-        if session is None or zip_available(session, pmcid):
+        if session is None:
+            return "pmc_suppl", SUPPL_URL.format(pmcid=pmcid)  # provisional, trusts hasSuppl
+        avail = zip_available(session, pmcid)
+        if avail is True:
             return "pmc_suppl", SUPPL_URL.format(pmcid=pmcid)
-        return "suppl_not_downloadable", None
+        if avail is False:
+            return "suppl_not_downloadable", None
+        return "suppl_check_failed", None
     if in_pmc:
         return "no_pmc_suppl", None
     return "unknown", None
@@ -161,13 +180,15 @@ def main() -> None:
         print(f"  [{min(i + BATCH, len(rows))}/{len(rows)}]", file=sys.stderr)
         time.sleep(REQ_INTERVAL)
 
-    counts = {"pmc_suppl": 0, "suppl_not_downloadable": 0, "no_pmc_suppl": 0, "unknown": 0}
+    counts = {"pmc_suppl": 0, "suppl_not_downloadable": 0, "suppl_check_failed": 0,
+              "no_pmc_suppl": 0, "unknown": 0}
     for r in results:
         counts[r["status"]] += 1
     verified = " (hasSuppl trusted, ZIP not verified)" if args.skip_verify else " (ZIP endpoint verified 200)"
     print("\n=== suppl-data-check ===")
     print(f"  pmc_suppl             (downloadable){verified} : {counts['pmc_suppl']}")
-    print(f"  suppl_not_downloadable (hasSuppl=Y, ZIP 404)   : {counts['suppl_not_downloadable']}")
+    print(f"  suppl_not_downloadable (hasSuppl=Y, confirmed non-200): {counts['suppl_not_downloadable']}")
+    print(f"  suppl_check_failed     (hasSuppl=Y, HEAD request failed -- retry) : {counts['suppl_check_failed']}")
     print(f"  no_pmc_suppl           (in PMC, none)          : {counts['no_pmc_suppl']}")
     print(f"  unknown                (not in PMC)            : {counts['unknown']}")
 

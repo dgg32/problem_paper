@@ -281,3 +281,291 @@ workflow.
 
 **Fix first:** #1, #2, #5. #1 is a latent correctness/ethics hazard for a project whose entire
 framing is "never mis-attribute"; #2 and #5 are concrete data-quality bugs in flag generation.
+
+---
+
+# Round 3 — bug hunt, 2026-09-03
+
+Scope: full-repo sweep of `graph_processing/`, `sensors/` (incl. `image_forensics/`),
+`review/pipeline_app.py`, and `config/weights.yaml`. Every finding below was verified against
+source in a second pass, and graph-dependent claims were checked with live Cypher counts
+(not noted inline where the check mattered). Round 1 items #1-#11 and Round 2 items R2-1..R2-3
+are treated as fixed and are not re-reported; Round 2's three "deliberate" non-fixes are
+likewise excluded.
+
+**Update, 2026-09-03 (same day):** all 15 findings below (R3-1..R3-15) were fixed and verified
+in a follow-up pass -- syntax-compiled, and where a live check was practical, run against the
+real Neo4j instance (a direct sensor invocation, an isolated `EXPLAIN` of the new Cypher, or a
+throwaway-node transaction smoke test). See each finding's **Fix** paragraph for what changed and
+how it was checked. Left as originally reported (not attempted): retry-with-backoff for R3-1's
+two fetch helpers -- out of scope for stopping the silent corpus-wide wipe, which the fail-closed
+change already does.
+
+### R3-1. Transient API failure silently wipes a scored signal corpus-wide — `sensors/external_retracted_citation_checker.py` + `graph_processing/wire_sensor_flags.py` (HIGH, correctness) — FIXED
+
+`fetch_reference_dois` returns `[]` on ANY `requests.RequestException` (no retry, 429 included,
+lines 96-97) and `openalex_retracted_batch` returns `{}` likewise (lines 115-116). `main()` then
+unconditionally writes the report (lines 213-214). `wire_sensor_flags.py` correctly treats a
+present-but-empty report as "sensor ran, found nothing" and resets
+`external_retracted_citation_flag_count` to 0 across all papers (lines 160-166). Composite
+failure: one Crossref/OpenAlex outage during a routine run produces an empty report, and the next
+`wire_sensor_flags.py` run silently zeroes a weight-2.0 scored signal for the whole corpus until
+a fully successful re-run. A partial variant is harder to notice: sporadic 429s at concurrency 4
+silently drop individual papers' reference lists from this run's report, and the reset then
+erases their previously-earned flags too (both fetch pools run at concurrency 3,
+external_retracted_citation_checker.py:68,73). The same empty-report-on-failure shape exists in
+the other sensors; this one is the highest-impact instance because it is scored and on the
+routine path.
+
+**Fix (2026-09-03):** `fetch_reference_dois`/`openalex_retracted_batch` now return `(result, ok)`
+instead of silently coercing a transport failure to an empty result. `main()` counts failures
+across both phases and, if any occurred, prints an explicit warning and `sys.exit(1)` **without
+writing `REPORT_JSON`** — the existing report (and hence the existing graph flags, via
+`wire_sensor_flags.py`'s reset-then-rewrite) is left untouched until a clean run succeeds.
+Retry-with-backoff was left out of scope (a separate enhancement, not needed to stop the silent
+wipe). Live-verified: `--doi` mode ran clean against a real DOI with no regression (23 external
+references checked, 0 false aborts against healthy Crossref/OpenAlex).
+
+### R3-2. Paper-level external institution rate defaults to 0.0 (missing == zero) — `graph_processing/institution_retraction_rate.py:251` (MEDIUM, correctness) — FIXED
+
+The per-paper reset writes `p.institution_retr_rate_external = 0.0` (not null, line 251), and the
+copy step (lines 279-289) only overwrites papers whose institutions carry a non-null
+`retraction_rate_external`. A paper whose institution has `global_retraction_count > 0` but an
+unresolvable ROR (`no_ror_hit` path, lines 220-222, also hit by any transient OpenAlex request
+failure) therefore shows a clean 0.000% on a SCORED (minmax) signal. This contradicts the
+module's own "missing != zero" rule (docstring lines 87-89) and misleads the review card.
+`tier_a_scoring.py` compounds it: `coalesce(p.institution_retr_rate_external, 0.0)` (QUERY line
+459) erases the null/unknown distinction at scoring time even if the reset were fixed. The
+sibling scripts reset journal/country paper-level rates to null; institution is the inconsistent
+one. Live check 2026-09-03: the no_ror_hit population is currently 0, so this is a correctness
+landmine rather than a live scoring error.
+
+**Fix (2026-09-03):** the paper-level reset now sets `institution_retr_rate` and
+`institution_retr_rate_external` to `null` instead of `0.0`, matching the sibling journal/country
+scripts' semantics. `tier_a_scoring.py` already `coalesce()`s both to `0.0` at scoring time (QUERY
+lines 456/459, unchanged), so live scoring is unaffected — this fixes the graph's own "missing !=
+zero" honesty for the review card, not the score.
+
+### R3-3. Institution-level external rate is never cleared — same script, lines 229-236 (MEDIUM, idempotency) — FIXED
+
+`retraction_rate_external` is written only for institutions that resolved this run; there is no
+reset statement for it. An institution that resolved in run N but hits `no_ror_hit` in run N+1
+keeps its stale rate, which then propagates to paper level via the copy step. Contradicts the
+docstring's "Idempotent: recomputes both Institution and Paper properties from scratch every
+run."
+
+**Fix (2026-09-03):** added a reset statement (`MATCH (i:Institution) SET
+i.retraction_rate_external/_n/_total = null`) right before the external-rate lookup loop,
+mirroring the journal/country pattern. Cypher syntax validated live via `EXPLAIN` against the
+real schema.
+
+### R3-4. DEFAULT_WEIGHTS diverges from the audited weights.yaml on `country_retr_rate_minmax_target` — `graph_processing/tier_a_scoring.py:327` vs `config/weights.yaml:188` (MEDIUM, drift) — FIXED
+
+`DEFAULT_WEIGHTS` hardcodes `country_retr_rate_minmax_target: 10.0`, but the audited config (the
+documented 2026-07-22 user decision, with the full Saudi-Arabia granularity rationale) is `2.5`,
+and weights.yaml's own header promises the fallback is "same values as below". Today the YAML
+overlays the default, so live scoring is correct; but if `config/weights.yaml` is ever missing or
+unparseable, the fallback silently re-raises the coarsest ecological signal 4x beyond its
+documented, reasoned value. Every other one of the 23 remaining keys (24 total) matches.
+
+**Fix (2026-09-03):** `DEFAULT_WEIGHTS["country_retr_rate_minmax_target"]` updated 10.0 -> 2.5 to
+match `config/weights.yaml`, with a comment pointing at the YAML's own rationale. Live-verified via
+`tier_a_scoring.py --top 5`: still reads `2.5` (from the YAML overlay, unchanged) and runs clean.
+
+### R3-5. Editorial-notice refresh is not idempotent for the "now-clear" case — `graph_processing/refresh_editorial_notices.py:179` (MEDIUM, correctness) — FIXED
+
+Papers classified `none` hit `continue` before the write step, so `pubmed_eoc_status` /
+`pubmed_eoc_date` / `pubmed_eoc_source_doi` written by an earlier run survive after PubMed stops
+reporting the notice. Since `tier_a_scoring.py` keys `pubmed_eoc_flag` off
+`pubmed_eoc_status = "expression_of_concern"` (weight 10.0, the largest single weight in the
+system), a stale status keeps contributing +10 indefinitely. Verified: the script contains
+exactly one write site for `pubmed_eoc_status` (line 206) and no clearing statement anywhere.
+
+**Fix (2026-09-03):** the `none` branch now appends an explicit clearing update
+(`status="none"`, `date`/`source_doi`/`source_citation` all `None`) instead of `continue`-skipping,
+so a paper whose EoC/Erratum notice no longer shows up in PubMed's CommentsCorrectionsList gets
+its stale fields nulled on the very next run, same as every other candidate. Also matches the
+module's own docstring, which already documented `pubmed_eoc_status: "none"` as a real written
+value — the old code never actually wrote it.
+
+### R3-6. ORI matching is case-sensitive against the graph — `graph_processing/refresh_ori_findings.py:123,142,151,170` (MEDIUM, latent) — FIXED
+
+`doi_to_finding` keys are `canon_doi(...)` (lowercased) but `graph_dois` are raw `p.doi` values,
+and both the reporting and write MATCHes compare exact case. Live check 2026-09-03: 0 uppercase
+DOIs among graph papers, so nothing is lost today; but Elsevier-style uppercase-suffix DOIs
+(e.g. `10.1016/S0895-4356(00)00298-4`) are common in publisher deposits, and one entering the
+graph would silently drop the system's strongest signal (`ori_finding_flag`, weight 4.0) with no
+warning.
+
+**Fix (2026-09-03):** `doi_to_finding` (already lowercased via `canon_doi`) is now compared
+against a `{lowercased: original-cased}` map of the graph's own DOIs, and `matches` is keyed by
+the graph's ORIGINAL casing -- so the write `MATCH (p:Paper {doi:$doi})` (exact equality) actually
+finds the node even for an uppercase-suffix DOI. Unit-tested in isolation with a synthetic
+Elsevier-style uppercase DOI: match found, original casing preserved for the write step.
+
+### R3-7. GDS prep labels are additive only; retraction-state flips leave stale labels — `graph_processing/gds_node_classification.py:86-106` (MEDIUM, idempotency) — FIXED
+
+`:LabeledPaper` and `:CandidatePaper` are only ever SET, never REMOVEd. Retraction Watch records
+160 reinstatements, so "retracted -> not retracted" flips are plausible: a reinstated paper keeps
+`:LabeledPaper` while `prep` overwrites its `misconduct_label` to -1, putting an invalid class
+value into a binary training target (`targetNodeLabels: ['LabeledPaper']`) — at best a training
+error, at worst silent mis-training. The reverse flip (newly retracted) leaves the paper in
+`:CandidatePaper`, so it gets re-predicted and can appear in the "TOP 15 CANDIDATES" printout.
+Contradicts the docstring's "Pipeline is fully idempotent".
+
+**Fix (2026-09-03):** `prep()` now opens with exactly that statement, `MATCH (p:Paper) REMOVE
+p:LabeledPaper, p:CandidatePaper`, before re-assigning either label. Cypher syntax validated live
+via `EXPLAIN` against the real schema.
+
+### R3-8. Duplicate entry in the AI-tell pattern list double-counts — `sensors/ai_text_tell_detector.py:80-81` (MEDIUM, trivial fix) — FIXED
+
+`"as an ai, i cannot"` appears twice in `MEDIUM_CONFIDENCE_PATTERNS`; the per-pattern scan loop
+emits one flag per matching entry, so a single occurrence yields two identical flags, inflating
+`ai_text_tell_flag_count` by 1 (weight 2.0 per flag) and duplicating the finding on the review
+page.
+
+**Fix (2026-09-03):** deleted the duplicate `"as an ai, i cannot"` line.
+
+### R3-9. Network errors become permanent "suppl_not_downloadable" facts — `sensors/suppl_data_check.py:82-83,102` (MEDIUM, correctness) — FIXED
+
+`zip_available` returns False on any `requests.RequestException` (timeout, reset, 5xx), and
+`classify` routes that False to the definitive `"suppl_not_downloadable"` state (docstring: "ZIP
+endpoint 404s"). A transient Europe PMC hiccup is therefore persisted as a graph fact that gates
+the downstream forensic image/data-table sensors, with no retry path.
+
+**Fix (2026-09-03):** `zip_available` now returns a tri-state (`True`/`False`/`None`) instead of
+coercing a `RequestException` to `False`; `classify()` routes the new `None` case to a distinct
+`suppl_check_failed` status, reserving `suppl_not_downloadable` for a confirmed non-200 response.
+Live-verified via `--dry-run --limit 5`: one of the five candidates checked
+(`10.3389/fmicb.2021.786233`) hit a real transient HEAD-request failure during the test run and
+was correctly classified `suppl_check_failed` rather than being recorded as a permanent
+`suppl_not_downloadable` -- caught the exact failure mode live, not just in theory.
+
+### R3-10. PubPeer review fields have no stale-state reset — `graph_processing/wire_sensor_flags.py:196-226` (LOW-MEDIUM, consistency) — FIXED
+
+The scored sensors got reset-then-rewrite semantics in R2-1, but the pubpeer block still only
+writes DOIs present in the current report and does nothing when the report is empty-but-present.
+A paper that drops out of `pubpeer_flags.json` keeps its old `pubpeer_check_status` /
+`pubpeer_comments_total` / `pubpeer_has_author_response` / `pubpeer_last_commented` forever on
+the review page. Unscored, so no score impact; purely stale-evidence risk.
+
+**Fix (2026-09-03):** the block now gates on `PUBPEER_FLAGS.exists()` (not truthiness of the parsed
+records, so a present-but-empty report is no longer silently skipped) and resets all five pubpeer
+properties across every Paper that has any before rewriting from the current report -- same
+reset-then-rewrite idiom R2-1 already gave the scored sensors. Cypher syntax validated live via
+`EXPLAIN` against the real schema.
+
+### R3-11. Duplicate input paths produce self-comparison HIGH image-reuse findings — `sensors/image_forensics/integrity_common.py` `iter_files` + `image_similarity_screen.py:46-58` (LOW) — FIXED
+
+`iter_files` appends every matching file per supplied path with no dedup by resolved path, and
+the similarity screen compares `files[i]` against `files[i+1:]`. Passing overlapping paths (the
+same directory twice, or a dir plus its parent) compares a file against itself: hamming 0,
+flagged HIGH "Potential image reuse". Unscored today, but the findings land in paperconan
+evidence bundles.
+
+**Fix (2026-09-03):** `iter_files` now dedupes on `path.resolve()` via a `seen` set before
+appending, for both the direct-file and directory-walk branches.
+
+### R3-12. reference_integrity_checker: dead `year` parameter; `--sample` is not random — `sensors/reference_integrity_checker.py:135-145,319-321` (LOW) — FIXED
+
+(a) `crossref_search(title, author, year)` never uses `year` in the Crossref query, so the
+documented "year off by 1" check cannot work: a reference whose only error is the year can still
+match well enough to be judged OK (score > 50 -> None). (b) `--sample`'s help says "random"
+papers but the query is `ORDER BY p.cited_by_count DESC LIMIT $lim` — deterministic top-cited,
+biasing spot-checks.
+
+**Fix (2026-09-03):** (a) `crossref_search` now appends `year` to the bibliographic query string
+when present (same free-text pattern already used for `author`), so a year mismatch actually
+affects Crossref's ranking instead of being silently dropped. (b) `--sample N` now runs a genuinely
+separate `ORDER BY rand()` query; the no-flag default keeps the original deterministic top-cited
+query (that default's determinism looked intentional, unrelated to `--sample`'s "random" promise).
+Live-verified: `--doi` ran clean with the year now included in the query (produced a real,
+correctly-unresolved flag for a genuinely unfindable reference).
+
+### R3-13. Institution external rate has no >1.0 sanity guard — `graph_processing/institution_retraction_rate.py:225` (LOW) — FIXED
+
+`rate = n / works_count` is stored unchecked; the sibling scripts
+(`journal_retraction_rate_external.py`, `publisher_retraction_rate.py`) discard rates > 1.0. A
+tiny OpenAlex works_count against a conservative exact-match numerator can produce a >100% rate
+that then anchors the minmax scale for the whole category (see tier_a_scoring's own warning
+about single-outlier minmax anchors).
+
+**Fix (2026-09-03):** added the sibling scripts' `if rate > 1.0: skip` guard (with a log line
+naming the institution, n, and works_count) right where `rate` is computed.
+
+### R3-14. Snapshot round-trip turns Neo4j Dates into Strings — `graph_processing/export_graph_snapshot.py` / `import_graph_snapshot.py:144,154` (LOW, latent) — FIXED
+
+`expand_targets.py:207` and `refresh_retraction_status.py:218` store `published_date` /
+`retraction_date` as Neo4j `date()` values; APOC JSON export serializes them as ISO strings and
+the import's `SET n += r.props` restores them as String properties. No pipeline code consumes
+these temporally today (grep-verified), so impact is limited to the snapshot's "restore exactly
+what the pipeline would have produced" guarantee being structurally untrue, plus any future
+Cypher that expects a temporal type on a restored graph.
+
+**Fix (2026-09-03):** added a `DATE_PROPS` table (documented next to `NATURAL_KEY`, currently
+`Paper.published_date`/`Paper.retraction_date`) and convert those string values back to
+`neo4j.time.Date` objects (via `Date.from_iso_format`) at parse time, before they're sent as
+Cypher parameters -- the driver serializes a native `Date` object as a real temporal type, not a
+string. Confirmed `neo4j.time.Date.from_iso_format` works against this project's installed driver
+version.
+
+### R3-15. Identity layer rewrite is not atomic — `graph_processing/link_instances.py:203-215` (LOW, operational) — FIXED
+
+`MATCH ()-[r:PROBABLY_SAME_AS]->() DELETE r` runs as one auto-commit, then edge writes follow in
+separate auto-committed UNWIND batches. A crash between the delete and the last batch leaves a
+partial identity layer, and a subsequent `cluster_instances.py` run would cluster over the
+truncated edges. Re-running `link_instances.py` repairs it, but nothing detects the state.
+
+**Fix (2026-09-03):** the delete and every UNWIND write batch now run inside one explicit
+`session.begin_transaction()` / `tx.commit()` block, so a crash partway through rolls back to the
+pre-run state instead of leaving a truncated identity layer. Live-verified with an isolated smoke
+test against the real database (throwaway `__BugFixSmokeTest` nodes/rel-type, never touching real
+`AuthorInstance`/`PROBABLY_SAME_AS` data): the transaction committed correctly and cleanup left no
+residue.
+
+### Verified non-issues (checked this round, deliberately not reported)
+
+- **paperconan scoring path:** all adjudicated `runs/*/meta.yaml` files carry the
+  `adjudicated:` key tier_a_scoring reads (`needs_human` / `false_positive` / `benign`
+  observed); the two runs with a TODO conclusion correctly score as None. Live-verified.
+- **`cluster_misconduct_dois` (mark_adjudication.py:68-72):** the unfiltered
+  `-[:WROTE]->(p:Paper)` collect looks like it would gather innocent papers, but the
+  AuthorInstance-one-WROTE-edge invariant (one authorship per node) makes `p` the misconduct
+  paper itself by construction. Live-verified: 0 instances with `on_misconduct_paper` have >1
+  WROTE edge, and every stored list contains only retracted DOIs.
+- **Uppercase DOIs:** 0 in the graph (live count), so R3-6 is latent, not live.
+- **Sensor JSON contract:** all 7 `SENSOR_CONFIG` entries' `doi_key` match what the sensors
+  actually write (`citing_paper_doi` vs `paper_doi`); no silently dropped flags.
+- **Weights drift beyond R3-4:** every other DEFAULT_WEIGHTS key matches weights.yaml.
+- **Review page escaping:** every externally-sourced string in `build_review_page.py` passes
+  through `esc()`/`esc_title()`; no injection surface found.
+- **HTTP hygiene in the enrichment family:** timeouts + `mailto` + 429/5xx retry present across
+  the refresh_*/rate scripts; no missing-timeout hang risk found.
+- **apply_overrides / expand_targets / add_paper_by_doi:** dedup and override precedence sound;
+  no double-add or unbounded-loop risk.
+
+### Priority summary
+
+| # | Issue | Impact | Effort | Status |
+|---|-------|--------|--------|--------|
+| R3-1 | empty-report-on-outage wipes a scored signal corpus-wide | High (silent signal loss) | M | FIXED |
+| R3-5 | stale pubmed_eoc_status keeps +10.0 scoring | High (scored, plausible) | XS | FIXED |
+| R3-7 | stale GDS labels can poison training with class -1 | Med (Tier-B integrity) | XS | FIXED |
+| R3-2 | institution external rate 0.0 default (missing == zero) | Med (scored, currently latent) | S | FIXED |
+| R3-4 | country minmax target 10.0 fallback vs audited 2.5 | Med (silent re-weight on fallback) | XS | FIXED |
+| R3-3 | institution external rate never cleared (stale) | Med | XS | FIXED |
+| R3-9 | network error -> permanent suppl_not_downloadable | Med (gates forensics) | S | FIXED |
+| R3-8 | duplicate AI-tell pattern double-counts | Low-Med (scored +2.0) | XS | FIXED |
+| R3-10 | pubpeer review fields never reset | Low-Med (stale evidence) | S | FIXED |
+| R3-6 | ORI DOI case sensitivity | Low (latent; strongest signal) | XS | FIXED |
+| R3-13 | institution rate >1.0 unguarded | Low | XS | FIXED |
+| R3-14 | snapshot Dates -> Strings | Low (round-trip guarantee) | S | FIXED |
+| R3-15 | identity rewrite not atomic | Low (operational) | S | FIXED |
+| R3-12 | dead year param; non-random --sample | Low | XS | FIXED |
+| R3-11 | duplicate paths -> self-comparison HIGH | Low | XS | FIXED |
+
+**Fixed first (as planned):** R3-1, R3-5, R3-7 were the top priority -- R3-1 was the only finding
+that could silently corrupt the triage ranking at corpus scale from a routine run; R3-5 quietly
+inflated the single largest weight in the system; R3-7 could crash or poison the Tier-B training
+the next time a paper flips retraction state. All three, and the remaining 12, are now fixed (see
+each finding's **Fix** paragraph above).

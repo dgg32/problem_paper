@@ -151,16 +151,28 @@ def emit_result(result: Dict[str, object], fmt: str, output: Optional[str]) -> s
 
 
 def iter_files(paths: Sequence[str], exts: Optional[Set[str]] = None) -> List[Path]:
+    # Dedup by resolved path (BUG.md R3-11): passing overlapping inputs (the same
+    # directory twice, or a dir plus its parent) must not let a file appear twice
+    # in the returned list -- downstream pairwise comparisons (e.g.
+    # image_similarity_screen.py) would then compare a file against itself and
+    # report a spurious "HIGH: potential image reuse" at hamming distance 0.
     files: List[Path] = []
+    seen: Set[Path] = set()
     for raw in paths:
         path = Path(raw)
         if path.is_file():
             if exts is None or path.suffix.lower() in exts:
-                files.append(path)
+                resolved = path.resolve()
+                if resolved not in seen:
+                    seen.add(resolved)
+                    files.append(path)
         elif path.is_dir():
             for child in path.rglob("*"):
                 if child.is_file() and (exts is None or child.suffix.lower() in exts):
-                    files.append(child)
+                    resolved = child.resolve()
+                    if resolved not in seen:
+                        seen.add(resolved)
+                        files.append(child)
     return sorted(files)
 
 

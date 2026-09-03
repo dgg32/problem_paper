@@ -197,6 +197,18 @@ def main() -> None:
                   f"(left at 0 -- see module docstring; should be rare since this graph's Institution.name "
                   f"values come directly from the same csv column)", file=sys.stderr)
 
+        print("[institution_retraction_rate] resetting retraction_rate_external for all institutions "
+              "(idempotency: an institution that resolved in an earlier run but hits no_ror_hit here "
+              "must not keep a stale rate -- BUG.md R3-3)...", file=sys.stderr)
+        s.run(
+            """
+            MATCH (i:Institution)
+            SET i.retraction_rate_external = null,
+                i.retraction_rate_external_n = null,
+                i.retraction_rate_external_total = null
+            """
+        ).consume()
+
         print("[institution_retraction_rate] external rate (OpenAlex works_count via ROR)...", file=sys.stderr)
         to_lookup = [
             r for r in s.run(
@@ -220,9 +232,19 @@ def main() -> None:
             if not works_count:
                 no_ror_hit += 1
                 continue
+            rate = row["n"] / works_count
+            if rate > 1.0:
+                # A tiny/miscounted OpenAlex works_count against our exact-match
+                # numerator can overshoot 100% -- an outlier like that would anchor
+                # the minmax scale for the whole category (BUG.md R3-13). Sibling
+                # scripts (journal/publisher external rate) already discard these.
+                print(f"  skipping {row['name']}: rate {rate:.2f} > 1.0 "
+                      f"(n={row['n']}, works_count={works_count}) -- unreliable denominator",
+                      file=sys.stderr)
+                continue
             external_results.append({
                 "name": row["name"], "n": row["n"], "total": works_count,
-                "rate": row["n"] / works_count,
+                "rate": rate,
             })
             if i % 20 == 0:
                 print(f"  [{i}/{len(to_lookup)}]", file=sys.stderr)
@@ -243,12 +265,12 @@ def main() -> None:
         s.run(
             """
             MATCH (p:Paper)
-            SET p.institution_retr_rate = 0.0,
+            SET p.institution_retr_rate = null,
                 p.institution_retr_rate_name = null,
                 p.institution_retr_rate_n = null,
                 p.institution_global_retraction_count = null,
                 p.institution_global_retraction_count_name = null,
-                p.institution_retr_rate_external = 0.0,
+                p.institution_retr_rate_external = null,
                 p.institution_retr_rate_external_name = null,
                 p.institution_retr_rate_external_n = null,
                 p.institution_retr_rate_external_total = null

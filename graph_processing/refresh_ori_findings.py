@@ -139,9 +139,18 @@ def main() -> None:
     conn = resolve_connection()
     driver = GraphDatabase.driver(conn["uri"], auth=(conn["user"], conn["password"]))
     with driver.session(database=conn["database"]) as s:
-        graph_dois = {r["doi"] for r in s.run("MATCH (p:Paper) WHERE p.doi IS NOT NULL RETURN p.doi AS doi")}
-
-    matches = {doi: f for doi, f in doi_to_finding.items() if doi in graph_dois}
+        graph_dois_raw = {r["doi"] for r in s.run("MATCH (p:Paper) WHERE p.doi IS NOT NULL RETURN p.doi AS doi")}
+    # doi_to_finding keys are already canon_doi()'d (lowercased). Graph DOIs are
+    # stored in whatever case they arrived in (Elsevier-style uppercase suffixes
+    # like "10.1016/S0895-4356(00)00298-4" are routine). Compare case-insensitively
+    # but key `matches` by the graph's OWN casing, so the write MATCH below (an
+    # exact-equality lookup) actually finds the node (BUG.md R3-6).
+    graph_doi_by_lower = {canon_doi(d): d for d in graph_dois_raw}
+    matches = {
+        graph_doi_by_lower[doi]: f
+        for doi, f in doi_to_finding.items()
+        if doi in graph_doi_by_lower
+    }
     print(f"  {len(matches)} of those DOIs are papers already in our graph")
 
     if matches:

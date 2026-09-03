@@ -194,11 +194,26 @@ def main() -> None:
           f"({written} property updates)")
 
     # pubpeer: routing pointer, not a weighted flag count (see module docstring).
-    pubpeer_records = load_flags(PUBPEER_FLAGS)
-    if pubpeer_records:
+    # Same reset-then-rewrite idiom as the scored sensors above (R2-1): a report
+    # FILE being present (even empty) means "checked", so a paper that drops out
+    # of the current pubpeer_flags.json must not keep stale check_status/
+    # comments_total forever (BUG.md R3-10). Previously this block only ran at
+    # all when the report was non-empty, and even then never cleared a DOI's
+    # fields once written.
+    if PUBPEER_FLAGS.exists():
+        pubpeer_records = load_flags(PUBPEER_FLAGS)
         driver = GraphDatabase.driver(conn["uri"], auth=(conn["user"], conn["password"]))
         pp_written = 0
         with driver.session(database=conn["database"]) as s:
+            cleared = s.run(
+                "MATCH (p:Paper) WHERE p.pubpeer_check_status IS NOT NULL "
+                "SET p.pubpeer_check_status = null, p.pubpeer_check_url = null, "
+                "    p.pubpeer_comments_total = null, p.pubpeer_has_author_response = null, "
+                "    p.pubpeer_last_commented = null "
+                "RETURN count(p) AS n"
+            ).single()["n"]
+            if cleared:
+                print(f"  pubpeer: reset {cleared} previously-checked paper(s) before rewrite")
             for rec in pubpeer_records:
                 doi = canon_doi(rec.get("paper_doi", ""))
                 if not doi:
@@ -223,6 +238,8 @@ def main() -> None:
         driver.close()
         print(f"\n  pubpeer: wrote check_status/check_url/comments_total for "
               f"{len(pubpeer_records)} papers ({pp_written} property updates)")
+    else:
+        print(f"\n  pubpeer: no report file at {PUBPEER_FLAGS.name} -- leaving existing properties as-is")
 
 
 if __name__ == "__main__":
