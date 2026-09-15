@@ -118,6 +118,18 @@ Scoring logic:
     non-redundant replacement. The property itself still exists as a Tier-B
     GDS input feature (gds_node_classification.py) -- only removed from
     Tier-A scoring/display.
+    UPDATE 2026-09-15: that fix was incomplete -- it removed the continuous
+    signal but left check 3 itself live, so journal_integrity_flag_count
+    kept scoring the identical inflated in-graph fact under a different
+    name. Measured before removal: 100% of the 225 live journal_integrity
+    flags came from check 3 alone (zero from the DOAJ/delisting checks),
+    with numbers like Nature at "50.0% (50 of ~200 papers in seed)" against
+    a real-world rate of 0.035%. Check 3 is now REMOVED from
+    journal_integrity_check.py entirely (not capped or reweighted -- a
+    capped-but-still-false rate is still false); journal_integrity_flag_count
+    now reflects only checks 1/2 (DOAJ, delisting), and
+    journal_retr_rate_external remains the sole, correctly-denominated
+    signal for "this journal has a bad track record."
   - institution_retr_rate_external / publisher_retr_rate / country_retr_rate /
     journal_retr_rate_external are all MINMAX-SCORED (see
     minmax_contribution() below), not weighted-and-capped. mid_any_count/

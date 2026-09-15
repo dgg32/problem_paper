@@ -53,14 +53,14 @@ RUNS_DIR = REPO_ROOT / "runs"
 TAG_LABELS = [
     ("eoc", "Expression of Concern"),
     ("ori", "ORI Finding"),
-    ("fl-misconduct", "1st/last author: misconduct retraction"),
-    ("fl-misconduct-volume", "1st/last author: misconduct retraction (volume)"),
-    ("fl-any-retr", "1st/last author: other retraction"),
-    ("fl-any-retr-volume", "1st/last author: other retraction (volume)"),
-    ("mid-misconduct", "Co-author: misconduct retraction"),
-    ("mid-misconduct-volume", "Co-author: misconduct retraction (volume)"),
-    ("mid-any-retr", "Co-author: other retraction"),
-    ("mid-any-retr-volume", "Co-author: other retraction (volume)"),
+    ("fl-misconduct", "1st/last author has a misconduct retraction"),
+    ("fl-misconduct-volume", "1st/last author's misconduct retraction count"),
+    ("fl-any-retr", "1st/last author has another retraction"),
+    ("fl-any-retr-volume", "1st/last author's retraction count"),
+    ("mid-misconduct", "Co-author has a misconduct retraction"),
+    ("mid-misconduct-volume", "Co-authors' misconduct retraction count"),
+    ("mid-any-retr", "Co-author has another retraction"),
+    ("mid-any-retr-volume", "Co-authors' retraction count"),
     ("cites-retracted", "Cites retracted"),
     ("cites-retracted-ext", "Cites retracted (ext.)"),
     ("self-cite", "Cites own retracted"),
@@ -80,7 +80,7 @@ TAG_LABELS = [
     ("pubpeer", "PubPeer"),
     ("pubpeer-allegation", "PubPeer allegation"),
     ("suppl", "Suppl data"),
-    ("paperconan", "paperconan"),
+    ("paperconan", "PaperConan"),
     ("image", "Image screen"),
 ]
 
@@ -231,13 +231,31 @@ WITH p, collect(DISTINCT a.cluster_id) AS clusters
 UNWIND clusters AS cid
 MATCH (mate:AuthorInstance {cluster_id: cid})-[:WROTE]->(mp:Paper)-[:RETRACTED_FOR]->(r:Reason)
 WHERE mp <> p
-WITH mate.name AS coauthor_name, cid AS cluster_id, mp, collect(DISTINCT r.code) AS codes
-WITH coauthor_name, cluster_id, mp, any(c IN codes WHERE c IN $reasons) AS mp_is_misconduct
-WITH coauthor_name, cluster_id,
+WITH cid, mate.name AS coauthor_name, mp, mate.orcid_doi_confirmed AS confirmed,
+     collect(DISTINCT r.code) AS codes
+WITH cid, coauthor_name, mp, confirmed, any(c IN codes WHERE c IN $reasons) AS mp_is_misconduct
+// confirmed/unconfirmed_dois (check_orcid_assignment.py, added 2026-09-16): does the
+// co-author's OWN ORCID record actually claim this specific retracted DOI? confirmed=true
+// is reassuring; confirmed=false is a caution (may be an OpenAlex mis-assignment, an
+// incomplete ORCID profile, or the paper dropped from ORCID after retraction -- not proof
+// either way, see that script's docstring); confirmed IS NULL (no orcid, or an empty
+// ORCID record) shows neither badge, same "absence isn't evidence" discipline as elsewhere.
+WITH cid, coauthor_name,
      collect(DISTINCT mp.doi) AS example_dois,
+     collect(DISTINCT CASE WHEN confirmed = true THEN mp.doi END) AS confirmed_dois,
+     collect(DISTINCT CASE WHEN confirmed = false THEN mp.doi END) AS unconfirmed_dois,
      any(f IN collect(mp_is_misconduct) WHERE f) AS has_misconduct
 WHERE has_misconduct = $misconduct
-RETURN coauthor_name, example_dois[0..2] AS example_dois
+// coherence_outlier (cluster_instances.py): an instance that joined this cluster via a
+// same-ORCID match at 0.97 but shares NEITHER a co-author NOR an institution with the
+// rest of it -- the "innocent flagged via a same-ORCID mis-assignment" risk. Surfaced
+// here so a reviewer sees the caveat on the card itself, not only as a buried graph
+// property (added 2026-09-16; previously computed but never read by this page).
+OPTIONAL MATCH (outlier:AuthorInstance {cluster_id: cid, coherence_outlier: true})
+WITH coauthor_name, example_dois, confirmed_dois, unconfirmed_dois,
+     count(outlier) > 0 AS has_outlier
+RETURN coauthor_name, example_dois[0..2] AS example_dois,
+       confirmed_dois, unconfirmed_dois, has_outlier
 ORDER BY coauthor_name
 LIMIT 6
 """
@@ -434,12 +452,12 @@ PUBPEER_ALLEGATION_CATEGORIES = {
 # needs_adjudication), the badge reflects the HUMAN verdict, not the raw count —
 # so a benign "26 high" reads calmly, and a real concern reads loud.
 ADJ_BADGE = {
-    "false_positive": ("badge-pc-ok", "paperconan: reviewed — false positive"),
-    "benign":         ("badge-pc-ok", "paperconan: reviewed — benign"),
-    "inconclusive":   ("badge-pc",    "paperconan: reviewed — inconclusive"),
-    "needs_data":     ("badge-pc",    "paperconan: reviewed — needs data"),
-    "needs_human":    ("badge-pc-hi", "paperconan: unresolved anomaly — needs human review"),
-    "confirmed":      ("badge-pc-hi", "paperconan: confirmed concern"),
+    "false_positive": ("badge-pc-ok", "PaperConan: reviewed — false positive"),
+    "benign":         ("badge-pc-ok", "PaperConan: reviewed — benign"),
+    "inconclusive":   ("badge-pc",    "PaperConan: reviewed — inconclusive"),
+    "needs_data":     ("badge-pc",    "PaperConan: reviewed — needs data"),
+    "needs_human":    ("badge-pc-hi", "PaperConan: unresolved anomaly — needs human review"),
+    "confirmed":      ("badge-pc-hi", "PaperConan: confirmed concern"),
 }
 
 
@@ -451,24 +469,24 @@ def paperconan_badge(pc: dict) -> str:
     adjudicated, the human verdict supersedes the raw count."""
     outcome = pc.get("outcome")
     if outcome == "no_data_files_available":
-        return '<span class="badge badge-pc">paperconan: no data</span>'
+        return '<span class="badge badge-pc">PaperConan: no data</span>'
     if outcome == "no_tabular_data":
-        return '<span class="badge badge-pc">paperconan: figures only</span>'
+        return '<span class="badge badge-pc">PaperConan: figures only</span>'
     if outcome:
-        return '<span class="badge badge-pc">paperconan: not scanned</span>'
+        return '<span class="badge badge-pc">PaperConan: not scanned</span>'
     adj = pc.get("adjudicated")
     if adj:
-        cls, label = ADJ_BADGE.get(adj, ("badge-pc", f"paperconan: reviewed — {adj}"))
+        cls, label = ADJ_BADGE.get(adj, ("badge-pc", f"PaperConan: reviewed — {adj}"))
         return f'<span class="badge {cls}">{esc(label)}</span>'
     # Unadjudicated: raw severity, marked as a draft so it isn't mistaken for a verdict.
     f = pc.get("findings") or {}
     hi, med = f.get("high", 0), f.get("medium", 0)
     draft = " (draft)" if pc.get("needs_adjudication") else ""
     if hi:
-        return f'<span class="badge badge-pc-hi">paperconan: {hi} high{draft}</span>'
+        return f'<span class="badge badge-pc-hi">PaperConan: {hi} high{draft}</span>'
     if med:
-        return f'<span class="badge badge-pc">paperconan: {med} medium{draft}</span>'
-    return f'<span class="badge badge-pc">paperconan: clean{draft}</span>'
+        return f'<span class="badge badge-pc">PaperConan: {med} medium{draft}</span>'
+    return f'<span class="badge badge-pc">PaperConan: clean{draft}</span>'
 
 
 def image_badge(img: dict) -> str:
@@ -542,9 +560,30 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
         ))
 
     def _coauthor_names(clist: list[dict]) -> str:
+        def _doi_link(d: str, confirmed: set, unconfirmed: set) -> str:
+            badge = ""
+            if d in confirmed:
+                badge = (' <span class="badge badge-pc-ok" '
+                         'title="This co-author\'s own ORCID record confirms this DOI as their own work.">'
+                         '✓ ORCID-confirmed</span>')
+            elif d in unconfirmed:
+                badge = (' <span class="badge badge-pc-hi" '
+                         'title="This DOI is not listed on the co-author\'s own ORCID record. Not proof either '
+                         'way -- may be an OpenAlex mis-assignment, an incomplete ORCID profile, or the paper '
+                         'dropped from ORCID after retraction.">⚠️ not ORCID-confirmed</span>')
+            return (f'<a href="https://doi.org/{esc(d)}" target="_blank" rel="noopener">{esc(d)}</a>'
+                    + badge)
+
         return "".join(
             f'<li>👤 <strong>{esc(c["coauthor_name"])}</strong> — '
-            + ", ".join(f'<a href="https://doi.org/{esc(d)}" target="_blank" rel="noopener">{esc(d)}</a>' for d in c["example_dois"])
+            + ", ".join(_doi_link(d, set(c.get("confirmed_dois") or []),
+                                  set(c.get("unconfirmed_dois") or []))
+                       for d in c["example_dois"])
+            + (' <span class="badge badge-pc-hi" '
+               'title="This identity cluster contains an instance flagged coherence_outlier: it joined via a '
+               'shared ORCID but shares no co-author or institution with the rest of the cluster. This specific '
+               'co-author link may be a wrong same-name match -- review before trusting it.">'
+               '⚠️ unverified identity match</span>' if c.get("has_outlier") else '')
             + '</li>'
             for c in clist
         )
@@ -606,12 +645,17 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
 
     # Journal/publisher-level signals grouped together. The graph-internal
     # `journal_retr_rate` (removed 2026-07-22, plan.md) used to sit here too,
-    # but it and journal_integrity_flag_count's check 3 measured the SAME
-    # underlying fact (this journal's retraction rate in our own seeded
-    # graph) two different ways -- one continuous, one a >10% threshold --
-    # so a paper could be scored twice for one real cause. Kept only the
-    # flag (journal_integrity_flag_count); journal_retr_rate_external below
-    # is the real, non-redundant replacement (a different, external-scale fact).
+    # but it and journal_integrity_flag_count's now-removed check 3 measured
+    # the SAME underlying fact (this journal's retraction rate in our own
+    # seeded graph) two different ways -- one continuous, one a >10%
+    # threshold -- so a paper could be scored twice for one real cause.
+    # Check 3 itself was removed entirely 2026-09-15 (see
+    # sensors/journal_integrity_check.py's module docstring): it wasn't just
+    # redundant, its small in-graph denominator produced outright false-
+    # looking rates (Nature "50.0%" against a real-world 0.035%).
+    # journal_integrity_flag_count now reflects only checks 1/2 (DOAJ,
+    # delisting); journal_retr_rate_external below is the real,
+    # correctly-denominated signal for a journal's track record.
     if r["journal_count"] > 0:
         flags = json.loads(r["journal_flags"] or "[]")
         reason = flags[0].get("reason") if flags else "flagged"
@@ -619,11 +663,10 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
             "📔 Journal integrity flag",
             r["journal_count"] * WEIGHTS["journal_integrity_flag_count"],
             f'<p>The specific reason for THIS paper: {esc(reason)}</p>',
-            help="This flag fires for any ONE of three different checks -- an OA-only "
-                 "publisher's journal missing from DOAJ, explicit delisting from Scopus/Web of Science, or "
-                 "this journal crossing a >10% retraction-rate threshold measured in OUR OWN graph (the same "
-                 "underlying fact as the removed \"Journal retraction rate\" row, just thresholded instead of "
-                 "continuous) -- so the same +1.00 score can mean quite different things paper to paper.",
+            help="This flag fires for either of two checks -- an OA-only publisher's journal "
+                 "missing from DOAJ, or explicit delisting from Scopus/Web of Science. A third check, an "
+                 "in-graph retraction-rate threshold, was removed 2026-09-15 for double-counting "
+                 "journal_retr_rate_external below on an inflated, small-sample denominator.",
             tag="journal",
         ))
 
@@ -734,7 +777,7 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
     pc_adj = pc.get("adjudicated") if pc else None
     if pc_adj in ("needs_human", "confirmed"):
         weight = WEIGHTS["paperconan_confirmed"] if pc_adj == "confirmed" else WEIGHTS["paperconan_needs_human"]
-        label = "paperconan: confirmed concern" if pc_adj == "confirmed" else "paperconan: unresolved anomaly"
+        label = "PaperConan: confirmed concern" if pc_adj == "confirmed" else "PaperConan: unresolved anomaly"
         parts.append(row(
             label, weight,
             f'{esc(pc.get("top_finding") or "")}. {esc(pc.get("conclusion") or "")} '
@@ -792,7 +835,7 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
             + minmax_note(key)
         )
         parts.append(row(
-            f'👤 {position.capitalize()} author retraction rate (external)'
+            f'👤 {position.capitalize()} author has a prior retraction (external)'
             + (' — misconduct-coded' if is_misconduct else ' — non-misconduct'),
             minmax_contribution(key, 1),
             f'{r[n_key]} out of {esc(r[name_key])}\'s {r[total_key]} ORCID-claimed works were retracted '
@@ -811,8 +854,8 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
             'rows elsewhere on this card. ' + minmax_note(volume_key)
         )
         parts.append(row(
-            f'👤 {position.capitalize()} author retraction rate — volume'
-            + (' (misconduct-coded)' if is_misconduct else ' (non-misconduct)'),
+            f'👤 {position.capitalize()} author\'s retraction count (external)'
+            + (' — misconduct-coded' if is_misconduct else ' — non-misconduct'),
             minmax_contribution(volume_key, volume_n),
             f'{volume_n} of {esc(r[name_key])}\'s ORCID-claimed works retracted'
             + (' for a misconduct-coded reason' if is_misconduct else '') + '.',
@@ -822,7 +865,7 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
 
     if r["mid_misconduct_count"] > 0:
         parts.append(row(
-            f'Co-authors in misconduct work ({r["mid_misconduct_count"]} co-author(s))',
+            f'Has a co-author with a misconduct retraction ({r["mid_misconduct_count"]} co-author(s))',
             minmax_contribution("mid_misconduct_count", r["mid_misconduct_count"]),
             f'<ul>{_coauthor_names(mid_coauthors_misconduct)}</ul>',
             help='Same person ≠ same responsibility. This means a MIDDLE co-author shares a cluster with '
@@ -837,7 +880,7 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
             tag="mid-misconduct",
         ))
         parts.append(row(
-            'Co-authors in misconduct work — volume',
+            "Co-authors' misconduct retraction count",
             minmax_contribution("mid_misconduct_volume", r["mid_misconduct_volume"]),
             f'{r["mid_misconduct_volume"]} other misconduct-coded retracted paper(s) total across the '
             f'{r["mid_misconduct_count"]} co-author(s) above (one prolific co-author can carry most of this '
@@ -852,7 +895,7 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
 
     if r["mid_any_count"] > 0:
         parts.append(row(
-            f'Co-authors in other retracted work, non-misconduct ({r["mid_any_count"]} co-author(s))',
+            f'Has a co-author with another retraction, non-misconduct ({r["mid_any_count"]} co-author(s))',
             minmax_contribution("mid_any_count", r["mid_any_count"]),
             f'<ul>{_coauthor_names(mid_coauthors_any)}</ul>',
             help='Same as the misconduct row above, but for a MIDDLE co-author whose other retracted '
@@ -862,7 +905,7 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
             tag="mid-any-retr",
         ))
         parts.append(row(
-            'Co-authors in other retracted work — volume',
+            "Co-authors' retraction count",
             minmax_contribution("mid_any_volume", r["mid_any_volume"]),
             f'{r["mid_any_volume"]} other non-misconduct retracted paper(s) total across the '
             f'{r["mid_any_count"]} co-author(s) above.',
@@ -956,7 +999,7 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
     if suppl and suppl != "unchecked":
         if suppl == "pmc_suppl" and r["pmc_suppl_url"]:
             body = (f'<a href="{esc(r["pmc_suppl_url"])}" target="_blank" rel="noopener">download files (ZIP)</a> '
-                    '<span class="muted">— fetchable from Europe PMC (ZIP verified); the forensic sensors (paperconan) can run on this.</span>')
+                    '<span class="muted">— fetchable from Europe PMC (ZIP verified); the forensic sensors (PaperConan) can run on this.</span>')
         elif suppl == "suppl_not_downloadable":
             body = ('<span class="muted">exists per the PMC record but is not downloadable from Europe PMC '
                     '(outside its open-access subset) — would need the publisher\'s page.</span>')
@@ -990,7 +1033,7 @@ def render_evidence(r: dict, mid_coauthors_misconduct: list[dict], mid_coauthors
             "A separate forensic input — signal, not verdict, and NOT part of the score. "
         )
         ctx.append(
-            f'<div class="ctx"><span class="ctx-t">paperconan</span> '
+            f'<div class="ctx"><span class="ctx-t">PaperConan</span> '
             f'<span class="muted">(numeric-forensics on the data tables, v{esc(pc.get("tool_version") or "?")})</span><br>'
             f'<span class="muted">{detail}{scored_note}'
             f'Full run: <code>runs/{esc(pc.get("_dir") or "")}/</code></span></div>'

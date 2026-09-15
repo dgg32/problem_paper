@@ -44,14 +44,19 @@ and expands every contributing signal into named, sourced evidence:
     publisher_retraction_rate.py / country_retraction_rate.py /
     journal_retraction_rate_external.py.
   - NOTE (removed 2026-07-22): the graph-internal `journal_retr_rate` used to
-    be scored here too, but it and journal_integrity_flag_count's check 3
-    (journal_integrity_check.py) measure the SAME underlying fact -- this
-    journal's retraction rate in our own seeded graph -- one continuously,
-    one as a >10% threshold, so a paper could be scored twice for one real
-    cause. Removed from the score entirely; journal_retr_rate_external above
-    is the real, non-redundant replacement. journal_retr_rate itself still
-    exists as a Tier-B GDS input feature (gds_node_classification.py), just
-    no longer surfaced/scored here.
+    be scored here too, but it and journal_integrity_flag_count's (then-)
+    check 3 (journal_integrity_check.py) measure the SAME underlying fact --
+    this journal's retraction rate in our own seeded graph -- one
+    continuously, one as a >10% threshold, so a paper could be scored twice
+    for one real cause. Removed from the score entirely; journal_retr_rate_external
+    above is the real, non-redundant replacement. journal_retr_rate itself
+    still exists as a Tier-B GDS input feature (gds_node_classification.py),
+    just no longer surfaced/scored here.
+  - UPDATE 2026-09-15: check 3 itself was also removed (not capped/
+    reweighted) -- it outlived the fix above and kept scoring the identical
+    inflated in-graph fact under journal_integrity_flag_count. See
+    sensors/journal_integrity_check.py's module docstring and
+    tier_a_scoring.py's WEIGHTS comment for the numbers.
   - crossref_correction_flag_count: Crossref-deposited correction notice(s)
     on this DOI -- see refresh_correction_history.py.
   - gds_misconduct_prob: the Tier-B GDS node-classification prior, surfaced
@@ -296,11 +301,12 @@ def main() -> None:
                     "count": row["journal_count"],
                     "weight": WEIGHTS["journal_integrity_flag_count"],
                     "contribution": row["journal_count"] * WEIGHTS["journal_integrity_flag_count"],
-                    "note": ("This flag fires for any ONE of three different checks (see "
+                    "note": ("This flag fires for either of two checks (see "
                              "sensors/journal_integrity_check.py): an OA-only publisher's journal missing "
-                             "from DOAJ, explicit Scopus/Web-of-Science delisting, or this journal crossing "
-                             "a >10% retraction-rate threshold measured in our own graph -- the same weight "
-                             "can mean different things paper to paper. The specific reason for THIS paper:"),
+                             "from DOAJ, or explicit Scopus/Web-of-Science delisting. A third check, an "
+                             "in-graph retraction-rate threshold, was removed 2026-09-15 for double-counting "
+                             "journal_retr_rate_external on an inflated, small-sample denominator. "
+                             "The specific reason for THIS paper:"),
                     "reason": journal_flags[0].get("reason") if journal_flags else "unknown",
                 })
 

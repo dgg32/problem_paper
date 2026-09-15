@@ -6,12 +6,29 @@ Flags papers published in journals or publishers with integrity concerns:
   1. OA-only-publisher journal NOT indexed in DOAJ (see below — replaces the
      old static predatory-publisher substring guess, 2026-07-19)
   2. Journals delisted from Scopus or Web of Science
-  3. Journals with disproportionately high retraction rates (measured from seed data)
 
 Severity:
   - "high": delisted journal
-  - "medium": not DOAJ-indexed despite an OA-only publisher, or elevated
-    retraction rate
+  - "medium": not DOAJ-indexed despite an OA-only publisher
+
+REMOVED 2026-09-15: Check 3 ("journal has an elevated retraction rate,
+measured from seed data") was cut entirely, not capped or reweighted. It
+computed a journal's retraction rate against a denominator of ONLY the
+papers from that journal already in this project's own Retraction-Watch-
+seeded graph -- a small, deliberately retraction-biased sample, not that
+journal's real publication volume. Measured live before removal: Nature
+"50.0% (50 of ~200 papers in seed)" against a real-world rate of 0.035%;
+Frontiers in Microbiology "75.0% (75 of ~133 papers in seed)" against
+0.049%. Every one of the 225 journal_integrity flags live at removal time
+came from this check alone, zero from checks 1/2. It also measured the
+exact same underlying fact as journal_retr_rate_external
+(graph_processing/journal_retraction_rate_external.py, already scored,
+minmax-scaled, denominated against Crossref's real per-journal DOI count)
+-- the same redundancy tier_a_scoring.py's WEIGHTS docstring already
+documents for the standalone journal_retr_rate signal removed 2026-07-22,
+which this check duplicated and outlived. See that docstring and
+graph_processing/build_review_page.py's journal-integrity row comment for
+the fuller history.
 
 Check 1 redesigned 2026-07-19 (graph_processing/refresh_doaj_status.py):
 the old PREDATORY_PUBLISHERS check flagged EVERY journal whose name
@@ -86,15 +103,6 @@ ORDER BY p.cited_by_count DESC
 LIMIT $limit
 """
 
-RETRACTION_RATE_QUERY = """
-MATCH (j:Journal)<-[:PUBLISHED_IN]-(p:Paper)
-WITH j, COUNT(*) AS total, SUM(CASE WHEN p.is_retracted THEN 1 ELSE 0 END) AS retracted
-WHERE total >= 10
-RETURN j.name AS name, retracted, total, (toFloat(retracted) / total) AS rate
-ORDER BY rate DESC
-LIMIT 50
-"""
-
 
 def canonicalize_journal_name(name: str) -> str:
     """Normalize journal name for comparison: lowercase, strip spaces/punctuation."""
@@ -129,7 +137,6 @@ def assess_paper(
     journal_name: str,
     publisher: str,
     doaj_indexed: bool | None,
-    high_rate_journals: dict[str, float],
 ) -> dict | None:
     """
     Assess journal integrity for a single paper.
@@ -162,22 +169,6 @@ def assess_paper(
             "journal_name": journal_name,
         }
 
-    # Check 3: High retraction rate (measured from seed data)
-    canon = canonicalize_journal_name(journal_name)
-    if canon in high_rate_journals:
-        rate = high_rate_journals[canon]
-        if rate > 0.10:  # >10% retraction rate is suspicious
-            return {
-                "flag": "journal_integrity",
-                "severity": "medium",
-                "reason": f"Journal has elevated retraction rate: {rate:.1%} "
-                          f"({int(rate * 100)} of ~{int(100 / rate)} papers in seed)",
-                "paper_doi": doi,
-                "paper_title": title,
-                "journal_name": journal_name,
-                "retraction_rate": rate,
-            }
-
     return None
 
 
@@ -190,15 +181,6 @@ def main() -> None:
     conn = resolve_connection()
     driver = GraphDatabase.driver(conn["uri"], auth=(conn["user"], conn["password"]))
 
-    # First pass: calculate high-retraction journals
-    with driver.session(database=conn["database"]) as s:
-        rate_rows = [dict(r) for r in s.run(RETRACTION_RATE_QUERY)]
-    high_rate_journals = {
-        canonicalize_journal_name(r["name"]): r["rate"]
-        for r in rate_rows
-    }
-
-    # Second pass: check candidate papers
     with driver.session(database=conn["database"]) as s:
         rows = [dict(r) for r in s.run(
             QUERY,
@@ -215,7 +197,6 @@ def main() -> None:
             row["journal_name"],
             row["publisher"],
             row["doaj_indexed"],
-            high_rate_journals
         )
         if flag:
             all_flags.append(flag)
