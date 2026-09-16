@@ -11,6 +11,20 @@ convention as `data/pdfs/` and `data/full_text_cache/`.
 
 Example: `10.3389/fimmu.2018.00063` → `runs/10.3389__fimmu.2018.00063/`
 
+## Naming real people
+
+This archive is public, so it follows one rule about naming authors or
+institutions in a `CONCLUSION.md`: a name appears only once the case is
+independently and publicly adjudicated, by a retraction notice, a formal
+institutional finding, or comparable public reporting, never on the strength
+of paperconan's own output alone. paperconan's findings are signal, not
+verdict (see below), so while a case is still open, `CONCLUSION.md` describes
+the paper and its findings without naming the author. Once a case closes
+publicly, as in `runs/10.1038__s41586-024-08248-5/`, where Nature's own
+retraction notice and the authors' institution's own disciplinary action are
+cited and verified before any name appears, the name is a matter of public
+record, not an accusation this project is making on its own.
+
 ## Per-run layout
 
 ```
