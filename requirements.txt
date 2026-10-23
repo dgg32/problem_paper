@@ -38,7 +38,7 @@ packaging==26.2
 paperconan==0.8.2
 pdfminer-six==20260107
 pdfplumber==0.11.10
-pillow==12.3.0
+pillow==13.0.0
 protobuf==7.35.1
 pycountry==26.2.16
 pycparser==3.0
